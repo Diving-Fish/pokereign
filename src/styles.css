@@ -1,3 +1,12 @@
+/* Pixel CJK font, vendored locally under /public/fonts so it is same-origin
+   (no CORS) and works offline. Falls back to monospace until it loads; since
+   PixiJS Text is rebuilt each frame, it swaps in automatically once ready. */
+@font-face {
+  font-family: "Zpix";
+  src: url("/fonts/zpix.woff2") format("woff2");
+  font-display: swap;
+}
+
 html,
 body,
 #app {
@@ -5,7 +14,13 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #101510;
+}
+
+body {
+  /* Warm dusk room: a radial glow behind the screen so the canvas sits in
+     atmosphere instead of floating on flat black. */
+  background:
+    radial-gradient(120% 90% at 50% 38%, #2a2740 0%, #14121e 58%, #0b0a12 100%);
 }
 
 #app {
@@ -16,5 +31,11 @@ body,
 canvas {
   display: block;
   image-rendering: pixelated;
-  box-shadow: 0 0 0 1px #263126;
+  border-radius: 4px;
+  /* Bezel + soft cast light to sell the "handheld screen" feel. */
+  box-shadow:
+    0 0 0 2px #0d0c14,
+    0 0 0 5px #353048,
+    0 18px 48px -12px rgba(0, 0, 0, 0.75),
+    0 0 90px -10px rgba(243, 177, 106, 0.28);
 }

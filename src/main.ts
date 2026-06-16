@@ -3,6 +3,7 @@ import "./styles.css";
 import { drawBattleBackground } from "./client/render/battleBackground";
 import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayout";
 import { fitCanvasToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
+import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { createMonster } from "./game/battle/createMonster";
@@ -38,7 +39,7 @@ const activeMap = PROTOTYPE_MAP;
 
 const app = new Application();
 await app.init({
-  background: "#172017",
+  background: "#14121e",
   width: GAME_WIDTH,
   height: GAME_HEIGHT,
   antialias: false
@@ -55,6 +56,9 @@ window.addEventListener("resize", () => fitCanvasToWindow(app.canvas));
 void Assets.load(getAllBattleSpriteUrls()).catch((error: unknown) => {
   console.warn("Failed to preload battle sprites.", error);
 });
+
+// Trigger the pixel font fetch now; canvas text picks it up once ready.
+void document.fonts?.load('16px "Zpix"').catch(() => undefined);
 
 const tileTextures: TileTextureMap = createTileTextures(app, activeMap.tileSize);
 
@@ -80,6 +84,13 @@ let spriteAnimation: BattleSpriteAnimation | null = null;
 let hpTween: HpTween | null = null;
 let pendingOutcome: BattleOutcome = "ongoing";
 const displayedHp = new Map<string, number>();
+
+// Global animation clock (seconds) for ambient motion: idle breathing,
+// caret bob, background shimmer, and timed entrance transitions.
+let elapsed = 0;
+let battleIntroStart = 0;
+let shakeUntil = 0;
+let shakeMag = 0;
 
 const playerRoster = [
   createMonster("charmander", 3),
@@ -182,6 +193,7 @@ function startBattle(encounter: MapEncounterObject): void {
   hpTween = null;
   pendingOutcome = "ongoing";
   displayedHp.clear();
+  battleIntroStart = elapsed;
   const foe = createMonster(encounter.speciesId, encounter.level, "foe");
   battle = new BattleEngine({
     playerRoster,
@@ -368,6 +380,13 @@ function startPlaybackStep(step: PlaybackStep): void {
   if (step.kind === "move") {
     spriteAnimation = { event: step.event, elapsed: 0, duration: step.duration };
   }
+  if (step.kind === "hp") {
+    const lost = step.tween.from - step.tween.to;
+    if (lost > 0) {
+      const fraction = lost / Math.max(1, step.tween.from);
+      triggerShake(0.22, 6 + fraction * 22);
+    }
+  }
 }
 
 function finishBattlePlaybackIfNeeded(): void {
@@ -391,7 +410,7 @@ function drawBattle(): void {
     return;
   }
 
-  drawBattleBackground(mapLayer);
+  drawBattleBackground(mapLayer, elapsed);
 
   const player = battleView.player.active;
   const foe = battleView.opponent.active;
@@ -412,14 +431,11 @@ function drawBattleDialog(): void {
     return;
   }
 
-  const commandBox = new Graphics();
-  commandBox.roundRect(32, 414, GAME_WIDTH - 64, 106, 6);
-  commandBox.fill("#f6f1dc");
-  commandBox.stroke({ color: "#2b2b2b", width: 3 });
-  mapLayer.addChild(commandBox);
+  drawFramedBox(32, 414, GAME_WIDTH - 64, 110);
 
   const divider = new Graphics();
-  divider.moveTo(690, 420).lineTo(690, 514).stroke({ color: "#2b2b2b", width: 2 });
+  divider.moveTo(688, 424).lineTo(688, 514).stroke({ color: PALETTE.boxEdge, width: 2, alpha: 0.6 });
+  divider.moveTo(690, 424).lineTo(690, 514).stroke({ color: PALETTE.gold, width: 1, alpha: 0.7 });
   mapLayer.addChild(divider);
 
   if (isPlaybackActive()) {
@@ -433,6 +449,32 @@ function drawBattleDialog(): void {
   drawBattleMenu();
 }
 
+// Reusable parchment box: dark frame, warm face, gold inner rule, top sheen.
+function drawFramedBox(x: number, y: number, width: number, height: number): void {
+  const frame = new Graphics();
+  frame.roundRect(x, y, width, height, 9).fill(PALETTE.boxEdge);
+  mapLayer.addChild(frame);
+
+  const face = new Graphics();
+  face.roundRect(x + 4, y + 4, width - 8, height - 8, 7).fill(PALETTE.boxFace);
+  face.roundRect(x + 4, y + height - 22, width - 8, 18, 7).fill(PALETTE.boxFaceLow);
+  face.roundRect(x + 4, y + 4, width - 8, height - 8, 7).stroke({ color: PALETTE.gold, width: 1.5, alpha: 0.7 });
+  mapLayer.addChild(face);
+
+  const sheen = new Graphics();
+  sheen.roundRect(x + 7, y + 6, width - 14, 4, 3).fill({ color: "#ffffff", alpha: 0.4 });
+  mapLayer.addChild(sheen);
+}
+
+// Right-pointing caret that bobs to mark the active selection.
+function drawCaret(x: number, y: number): void {
+  const bob = Math.sin(elapsed * 7) * 2.5 + 2.5;
+  const caret = new Graphics();
+  caret.moveTo(x + bob, y).lineTo(x + bob + 9, y + 5).lineTo(x + bob, y + 10).fill(PALETTE.select);
+  caret.stroke({ color: PALETTE.selectGlow, width: 1, alpha: 0.8 });
+  mapLayer.addChild(caret);
+}
+
 function drawMoveOptions(): void {
   if (!battleView) {
     return;
@@ -440,18 +482,30 @@ function drawMoveOptions(): void {
 
   battleView.player.active.moves.forEach((moveId, index) => {
     const move = MOVES[moveId];
-    const label = `${index === selectedMoveIndex ? "> " : "  "}${move.name}  ${move.type}/${move.category}`;
-    const text = new Text({
-      text: label,
-      style: {
-        fill: index === selectedMoveIndex ? "#2b4f9c" : "#222222",
-        fontFamily: "monospace",
-        fontSize: 18
-      }
+    const selected = index === selectedMoveIndex;
+    const col = index % 2;
+    const rowX = 64 + col * 308;
+    const rowY = 438 + Math.floor(index / 2) * 36;
+
+    if (selected) {
+      drawCaret(rowX - 18, rowY + 6);
+    }
+
+    const name = new Text({
+      text: move.name,
+      style: pixelText({ fill: selected ? PALETTE.select : PALETTE.boxInk, fontSize: 19, fontWeight: selected ? "700" : "400" })
     });
-    text.x = 64 + (index % 2) * 300;
-    text.y = 438 + Math.floor(index / 2) * 34;
-    mapLayer.addChild(text);
+    name.x = rowX;
+    name.y = rowY;
+    mapLayer.addChild(name);
+
+    const meta = new Text({
+      text: `${move.type}·${move.category}`,
+      style: pixelText({ fill: PALETTE.boxInkSoft, fontSize: 12 })
+    });
+    meta.x = rowX + 150;
+    meta.y = rowY + 5;
+    mapLayer.addChild(meta);
   });
 }
 
@@ -461,31 +515,35 @@ function drawPokemonOptions(): void {
   }
 
   battleView.player.roster.forEach((monster, index) => {
-    const current = index === battleView?.player.activeIndex ? " 出战中" : "";
-    const fainted = monster.currentHp <= 0 ? " 倒下" : "";
+    const selected = index === selectedPokemonIndex;
+    const isActive = index === battleView?.player.activeIndex;
+    const fainted = monster.currentHp <= 0;
     const hp = getDisplayedHp(monster.instanceId, monster.currentHp);
-    const label = `${index === selectedPokemonIndex ? "> " : "  "}${monster.name} Lv.${monster.level} ${hp}/${monster.maxHp}${current}${fainted}`;
-    const text = new Text({
-      text: label,
-      style: {
-        fill: index === selectedPokemonIndex ? "#2b4f9c" : monster.currentHp <= 0 ? "#8b8177" : "#222222",
-        fontFamily: "monospace",
-        fontSize: 17
-      }
+    const rowY = 430 + index * 28;
+
+    if (selected) {
+      drawCaret(46, rowY + 6);
+    }
+
+    const fill = fainted ? "#a89a6e" : selected ? PALETTE.select : PALETTE.boxInk;
+    const tag = isActive ? "  ◆出战" : fainted ? "  ✕倒下" : "";
+    const label = new Text({
+      text: `${monster.name}  Lv.${monster.level}  ${hp}/${monster.maxHp}${tag}`,
+      style: pixelText({ fill, fontSize: 17, fontWeight: selected ? "700" : "400" })
     });
-    text.x = 64;
-    text.y = 430 + index * 28;
-    mapLayer.addChild(text);
+    label.x = 64;
+    label.y = rowY;
+    mapLayer.addChild(label);
   });
 }
 
 function drawDialogText(textValue: string): void {
   const text = new Text({
     text: textValue,
-    style: { fill: "#222222", fontFamily: "monospace", fontSize: 19, wordWrap: true, wordWrapWidth: 600 }
+    style: pixelText({ fill: PALETTE.boxInk, fontSize: 19, wordWrapWidth: 600 })
   });
   text.x = 64;
-  text.y = 444;
+  text.y = 448;
   mapLayer.addChild(text);
 }
 
@@ -497,92 +555,154 @@ function drawBattleMenu(): void {
 
   options.forEach(([menuMode, label], index) => {
     const selected = battleMenuMode === menuMode;
+    const rowY = 438 + index * 34;
+
+    if (selected) {
+      drawCaret(704, rowY + 7);
+    }
+
     const text = new Text({
-      text: `${selected ? "> " : "  "}${label}`,
-      style: {
-        fill: selected ? "#2b4f9c" : "#222222",
-        fontFamily: "monospace",
-        fontSize: 20,
-        fontWeight: selected ? "700" : "400"
-      }
+      text: label,
+      style: pixelText({ fill: selected ? PALETTE.select : PALETTE.boxInk, fontSize: 20, fontWeight: selected ? "700" : "400" })
     });
-    text.x = 720;
-    text.y = 438 + index * 34;
+    text.x = 724;
+    text.y = rowY;
     mapLayer.addChild(text);
   });
 
   const hint = new Text({
-    text: "Tab 切换  Enter 确定",
-    style: { fill: "#5d554d", fontFamily: "monospace", fontSize: 13 }
+    text: "Tab 切换 · Enter 确定",
+    style: pixelText({ fill: PALETTE.boxInkSoft, fontSize: 12 })
   });
-  hint.x = 720;
-  hint.y = 492;
+  hint.x = 704;
+  hint.y = 494;
   mapLayer.addChild(hint);
 }
 
 function drawBattleSprite(speciesId: SpeciesId, facing: "front" | "back", side: BattleSide, x: number, y: number, scale: number): void {
   const offset = getSpriteAnimationOffset(side);
+
+  // Entrance: slide in toward the platform and fade up.
+  const intro = easeOutCubic(clamp01((elapsed - battleIntroStart) / 0.5));
+  const introSlide = (1 - intro) * (side === "player" ? -90 : 90);
+
+  // Idle breathing: gentle vertical bob, out of phase per side.
+  const phase = side === "player" ? 0 : Math.PI;
+  const bob = Math.sin(elapsed * 2.2 + phase) * 2.2;
+
+  // Cast shadow on the platform.
+  const shadow = new Graphics();
+  const shadowW = 64 * (scale / 2.7);
+  shadow.ellipse(x + offset.x + introSlide, y + 6, shadowW, shadowW * 0.32).fill({ color: "#243018", alpha: 0.32 * intro });
+  mapLayer.addChild(shadow);
+
   const sprite = Sprite.from(getBattleSpriteUrl(speciesId, facing));
   sprite.anchor.set(0.5, 1);
   sprite.scale.set(scale);
-  sprite.x = x + offset.x;
-  sprite.y = y + offset.y;
+  sprite.x = x + offset.x + introSlide;
+  sprite.y = y + offset.y + bob;
+  sprite.alpha = intro;
   mapLayer.addChild(sprite);
 }
 
 function drawMonsterPanel(x: number, y: number, name: string, level: number, hp: number, maxHp: number, mirror: boolean): void {
   const width = 300;
-  const height = 78;
-  const shadow = new Graphics();
-  shadow.roundRect(x + 5, y + 5, width, height, 10);
-  shadow.fill({ color: "#ffffff", alpha: 0.85 });
-  mapLayer.addChild(shadow);
+  const height = 80;
 
-  const body = new Graphics();
-  body.roundRect(x, y, width, height, 10);
-  body.fill("#2b2d2b");
-  body.stroke({ color: "#f3f1df", width: 3 });
-  mapLayer.addChild(body);
+  const panel = new Container();
+  mapLayer.addChild(panel);
+
+  // Entrance: foe panel slides in from the left, player from the right.
+  const intro = easeOutCubic(clamp01((elapsed - battleIntroStart) / 0.45));
+  panel.x = x + (1 - intro) * (mirror ? 140 : -140);
+  panel.y = y;
+  panel.alpha = intro;
+
+  // Grounded drop shadow.
+  const shadow = new Graphics();
+  shadow.roundRect(6, 8, width, height, 12).fill({ color: "#0a0911", alpha: 0.4 });
+  panel.addChild(shadow);
+
+  // Dark outer edge then lighter glass face (a cheap bevel).
+  const edge = new Graphics();
+  edge.roundRect(0, 0, width, height, 12).fill(PALETTE.panelEdgeDark);
+  panel.addChild(edge);
+
+  const face = new Graphics();
+  face.roundRect(2, 2, width - 4, height - 5, 11).fill(PALETTE.panelFace);
+  face.roundRect(2, 2, width - 4, height - 5, 11).stroke({ color: PALETTE.panelEdgeLight, width: 2 });
+  panel.addChild(face);
+
+  // Top highlight strip + a gold accent rule under the name.
+  const sheen = new Graphics();
+  sheen.roundRect(6, 5, width - 12, 3, 2).fill({ color: "#ffffff", alpha: 0.14 });
+  sheen.rect(18, 34, width - 36, 1).fill({ color: PALETTE.gold, alpha: 0.55 });
+  panel.addChild(sheen);
 
   const nameText = new Text({
-    text: `${name}  Lv.${level}`,
-    style: { fill: "#f8f6e6", fontFamily: "monospace", fontSize: 20, fontWeight: "700" }
+    text: name,
+    style: pixelText({ fill: PALETTE.ink, fontSize: 20, fontWeight: "700", shadow: true })
   });
-  nameText.x = x + 20;
-  nameText.y = y + 12;
-  mapLayer.addChild(nameText);
+  nameText.x = 18;
+  nameText.y = 11;
+  panel.addChild(nameText);
+
+  const levelText = new Text({
+    text: `Lv.${level}`,
+    style: pixelText({ fill: PALETTE.gold, fontSize: 16, fontWeight: "700", shadow: true })
+  });
+  levelText.x = width - 18 - levelText.width;
+  levelText.y = 13;
+  panel.addChild(levelText);
 
   const hpLabel = new Text({
     text: "HP",
-    style: { fill: "#f8f6e6", fontFamily: "monospace", fontSize: 14, fontStyle: "italic", fontWeight: "700" }
+    style: pixelText({ fill: PALETTE.gold, fontSize: 13, fontWeight: "700" })
   });
-  hpLabel.x = x + 56;
-  hpLabel.y = y + 43;
-  mapLayer.addChild(hpLabel);
+  hpLabel.x = 18;
+  hpLabel.y = 50;
+  panel.addChild(hpLabel);
 
-  const hpBack = new Graphics();
-  hpBack.roundRect(x + 88, y + 44, 178, 10, 2);
-  hpBack.fill("#111111");
-  mapLayer.addChild(hpBack);
-
-  const hpInset = new Graphics();
-  hpInset.roundRect(x + 91, y + 46, 172, 6, 2);
-  hpInset.fill("#3a3a36");
-  mapLayer.addChild(hpInset);
-
-  const hpRatio = Math.max(0, Math.min(1, hp / maxHp));
-  const hpFill = new Graphics();
-  hpFill.roundRect(x + 91, y + 46, 172 * hpRatio, 6, 2);
-  hpFill.fill(hpRatio > 0.5 ? "#20d85a" : hpRatio > 0.25 ? "#e0c03b" : "#e84a3a");
-  mapLayer.addChild(hpFill);
+  drawHpBar(panel, 52, 49, 196, 11, hp, maxHp);
 
   const hpText = new Text({
-    text: `${hp}/${maxHp}`,
-    style: { fill: "#f8f6e6", fontFamily: "monospace", fontSize: 15, fontWeight: "700" }
+    text: `${Math.max(0, hp)}/${maxHp}`,
+    style: pixelText({ fill: PALETTE.inkSoft, fontSize: 14, fontWeight: "700" })
   });
-  hpText.x = mirror ? x + 186 : x + 202;
-  hpText.y = y + 56;
-  mapLayer.addChild(hpText);
+  hpText.x = width - 18 - hpText.width;
+  hpText.y = 49;
+  panel.addChild(hpText);
+}
+
+function drawHpBar(parent: Container, x: number, y: number, width: number, height: number, hp: number, maxHp: number): void {
+  const ratio = Math.max(0, Math.min(1, hp / maxHp));
+  const { hi, lo } = hpColors(ratio);
+
+  // Inset track.
+  const track = new Graphics();
+  track.roundRect(x, y, width, height, height / 2).fill(PALETTE.hpTrack);
+  track.roundRect(x, y, width, height, height / 2).stroke({ color: "#000000", width: 1, alpha: 0.6 });
+  parent.addChild(track);
+
+  const fillW = Math.max(0, (width - 4) * ratio);
+  if (fillW > 0) {
+    const fill = new Graphics();
+    const innerH = height - 4;
+    // Two-tone vertical gradient: bright top half, darker bottom half.
+    fill.roundRect(x + 2, y + 2, fillW, innerH, innerH / 2).fill(lo);
+    fill.roundRect(x + 2, y + 2, fillW, innerH * 0.55, innerH / 2).fill(hi);
+    // Glossy top line.
+    fill.rect(x + 3, y + 3, Math.max(0, fillW - 2), 1).fill({ color: "#ffffff", alpha: 0.5 });
+    parent.addChild(fill);
+  }
+
+  // Segment ticks for the classic handheld bar read.
+  const ticks = new Graphics();
+  for (let i = 1; i < 8; i += 1) {
+    const tx = x + (width / 8) * i;
+    ticks.rect(tx, y + 1, 1, height - 2).fill({ color: "#000000", alpha: 0.28 });
+  }
+  parent.addChild(ticks);
 }
 
 function drawMoveAnimation(): void {
@@ -592,36 +712,86 @@ function drawMoveAnimation(): void {
 
   const progress = Math.min(1, spriteAnimation.elapsed / spriteAnimation.duration);
   const event = spriteAnimation.event;
+  const color = getMoveColor(event.moveId);
 
   if (event.animation === "projectile") {
     const from = getBattleSpritePosition(event.userSide);
     const to = getBattleSpritePosition(event.targetSide);
+    const px = lerp(from.x, to.x, progress);
+    const py = lerp(from.y - 72, to.y - 72, progress);
+
+    // Fading trail behind the orb.
+    const trail = new Graphics();
+    for (let i = 1; i <= 5; i += 1) {
+      const tp = Math.max(0, progress - i * 0.06);
+      trail.circle(lerp(from.x, to.x, tp), lerp(from.y - 72, to.y - 72, tp), 9 - i).fill({ color, alpha: 0.12 * (5 - i) });
+    }
+    mapLayer.addChild(trail);
+
     const orb = new Graphics();
-    orb.circle(lerp(from.x, to.x, progress), lerp(from.y - 72, to.y - 72, progress), 9);
-    orb.fill(getMoveColor(event.moveId));
-    orb.stroke({ color: "#ffffff", width: 2, alpha: 0.7 });
+    orb.circle(px, py, 13).fill({ color, alpha: 0.35 });
+    orb.circle(px, py, 8).fill(color);
+    orb.circle(px - 2, py - 2, 3).fill({ color: "#ffffff", alpha: 0.85 });
     mapLayer.addChild(orb);
+
+    // Impact burst as it lands.
+    if (progress > 0.82) {
+      const burst = (progress - 0.82) / 0.18;
+      const flash = new Graphics();
+      flash.circle(to.x, to.y - 72, 6 + burst * 26).stroke({ color, width: 3, alpha: 1 - burst });
+      mapLayer.addChild(flash);
+    }
+  }
+
+  if (event.animation === "contact") {
+    // White impact flash on the target at the apex of the lunge.
+    const apex = Math.sin(progress * Math.PI);
+    if (apex > 0.4) {
+      const to = getBattleSpritePosition(event.targetSide);
+      const flash = new Graphics();
+      flash.circle(to.x, to.y - 72, 18 + apex * 14).fill({ color: "#ffffff", alpha: 0.28 * apex });
+      flash.circle(to.x, to.y - 72, 28 + apex * 18).stroke({ color, width: 3, alpha: 0.5 * apex });
+      mapLayer.addChild(flash);
+    }
   }
 
   if (event.animation === "status") {
     const center = getBattleSpritePosition(event.userSide);
     const pulse = new Graphics();
-    pulse.circle(center.x, center.y - 72, 24 + progress * 18);
-    pulse.stroke({ color: getMoveColor(event.moveId), width: 3, alpha: 1 - progress });
+    pulse.circle(center.x, center.y - 72, 24 + progress * 22).stroke({ color, width: 3, alpha: 1 - progress });
+    pulse.circle(center.x, center.y - 72, 14 + progress * 30).stroke({ color, width: 2, alpha: 0.6 * (1 - progress) });
     mapLayer.addChild(pulse);
   }
 }
 
 app.ticker.add((ticker) => {
+  elapsed += ticker.deltaMS / 1000;
+
   if (mode === "map") {
+    mapLayer.position.set(0, 0);
     updateMap(ticker.deltaMS);
     drawMap();
   } else {
+    applyScreenShake();
     updateBattlePlayback(ticker.deltaMS);
     drawBattle();
   }
   uiLayer.removeChildren();
 });
+
+function applyScreenShake(): void {
+  if (elapsed < shakeUntil) {
+    const energy = (shakeUntil - elapsed) * shakeMag;
+    mapLayer.position.set((Math.random() - 0.5) * energy, (Math.random() - 0.5) * energy);
+  } else {
+    mapLayer.position.set(0, 0);
+  }
+}
+
+function triggerShake(durationSec: number, magnitude: number): void {
+  shakeUntil = elapsed + durationSec;
+  shakeMag = magnitude;
+}
 
 function getBattleSpritePosition(side: BattleSide): { x: number; y: number } {
   if (!battleView) {
@@ -682,6 +852,10 @@ function getMoveColor(moveId: MoveId): string {
 
 function lerp(from: number, to: number, progress: number): number {
   return from + (to - from) * progress;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 function easeOutCubic(progress: number): number {
