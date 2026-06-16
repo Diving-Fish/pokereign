@@ -6,8 +6,8 @@ import type { TextStyleFontWeight } from "pixi.js";
  */
 
 // Pixel CJK font with graceful fallback to the platform monospace.
-// Loaded via @font-face in styles.css; once the browser has it, every Text
-// created after that frame picks it up automatically (we rebuild each frame).
+// Loaded via @font-face in styles.css; existing Text objects use this family
+// and fall back gracefully until the browser finishes loading it.
 export const FONT_PIXEL = '"Zpix", "DotGothic16", "Courier New", monospace';
 
 export const PALETTE = {

@@ -3,22 +3,44 @@ import { BATTLE_LAYOUT } from "./battleLayout";
 import { GAME_HEIGHT, GAME_WIDTH } from "./screen";
 import { PALETTE } from "./theme";
 
+export type BattleBackgroundView = {
+  container: Container;
+  sunHalo: Graphics;
+  stripes: Graphics;
+};
+
 /**
- * Layered golden-hour battlefield: gradient dusk sky, a low sun with a soft
- * halo, two parallax hill silhouettes, a lit grass field with perspective
- * stripes, and two crafted platforms with rim light + grounded shadow.
- * `time` (seconds) drives a subtle shimmer so the scene never feels static.
+ * Builds the layered golden-hour battlefield once and returns the handful of
+ * nodes that animate: gradient dusk sky, a low sun with a soft halo, two
+ * parallax hill silhouettes, a lit grass field with perspective stripes, and
+ * two crafted platforms with rim light + grounded shadow. The sun halo and
+ * grass stripes are redrawn per frame in `updateBattleBackgroundView` so the
+ * scene shimmers without rebuilding the whole background.
  */
-export function drawBattleBackground(layer: Container, time = 0): void {
-  drawGradient(layer, 0, 0, GAME_WIDTH, 270, PALETTE.skyTop, PALETTE.skyMid);
-  drawGradient(layer, 0, 200, GAME_WIDTH, 130, PALETTE.skyMid, PALETTE.skyHorizon);
+export function createBattleBackgroundView(): BattleBackgroundView {
+  const container = new Container();
+  drawGradient(container, 0, 0, GAME_WIDTH, 270, PALETTE.skyTop, PALETTE.skyMid);
+  drawGradient(container, 0, 200, GAME_WIDTH, 130, PALETTE.skyMid, PALETTE.skyHorizon);
 
-  drawSun(layer, time);
-  drawHills(layer);
-  drawField(layer, time);
+  const sunHalo = new Graphics();
+  container.addChild(sunHalo);
+  drawSunDisc(container);
+  drawHills(container);
+  drawFieldBase(container);
 
-  drawPlatform(layer, BATTLE_LAYOUT.player.platform, PALETTE.field, "#9fbe6a", "#4f6a39");
-  drawPlatform(layer, BATTLE_LAYOUT.foe.platform, "#b6c07b", "#cdd69a", "#79865a");
+  const stripes = new Graphics();
+  container.addChild(stripes);
+
+  drawPlatform(container, BATTLE_LAYOUT.player.platform, PALETTE.field, "#9fbe6a", "#4f6a39");
+  drawPlatform(container, BATTLE_LAYOUT.foe.platform, "#b6c07b", "#cdd69a", "#79865a");
+
+  updateBattleBackgroundView({ container, sunHalo, stripes }, 0);
+  return { container, sunHalo, stripes };
+}
+
+export function updateBattleBackgroundView(view: BattleBackgroundView, time: number): void {
+  drawSunHalo(view.sunHalo, time);
+  drawFieldStripes(view.stripes, time);
 }
 
 function drawGradient(
@@ -39,16 +61,19 @@ function drawGradient(
   layer.addChild(g);
 }
 
-function drawSun(layer: Container, time: number): void {
+function drawSunHalo(halo: Graphics, time: number): void {
   const cx = 720;
   const cy = 196;
   const breathe = 1 + Math.sin(time * 0.8) * 0.04;
-  const halo = new Graphics();
+  halo.clear();
   for (let r = 96; r > 0; r -= 12) {
     halo.circle(cx, cy, r * breathe).fill({ color: PALETTE.sun, alpha: 0.06 });
   }
-  layer.addChild(halo);
+}
 
+function drawSunDisc(layer: Container): void {
+  const cx = 720;
+  const cy = 196;
   const disc = new Graphics();
   disc.circle(cx, cy, 34).fill({ color: "#fff0c4" });
   disc.circle(cx, cy, 34).stroke({ color: PALETTE.sun, width: 4, alpha: 0.6 });
@@ -71,13 +96,14 @@ function drawHills(layer: Container): void {
   layer.addChild(near);
 }
 
-function drawField(layer: Container, time: number): void {
+function drawFieldBase(layer: Container): void {
   const field = new Graphics();
   field.rect(0, 318, GAME_WIDTH, GAME_HEIGHT - 318).fill(PALETTE.field);
   layer.addChild(field);
+}
 
-  // Perspective stripes fanning toward the horizon, with a slow light sweep.
-  const stripes = new Graphics();
+function drawFieldStripes(stripes: Graphics, time: number): void {
+  stripes.clear();
   const sweep = (Math.sin(time * 0.5) + 1) / 2;
   for (let i = 0; i < 26; i += 1) {
     const y = 326 + i * 9;
@@ -88,7 +114,6 @@ function drawField(layer: Container, time: number): void {
       .lineTo(GAME_WIDTH + skew * 6, y - skew)
       .stroke({ color: PALETTE.fieldStripe, width: 2, alpha });
   }
-  layer.addChild(stripes);
 }
 
 function drawPlatform(

@@ -136,10 +136,19 @@
 - The current map tile art is generated placeholder art, not final tileset art.
 - Map schema is intentionally close to what a future Tiled JSON import can produce.
 
-## Known Performance Issue (Not Yet Addressed)
+## Historical Performance Issue (Addressed)
 
-The renderer fights PixiJS's retained-mode model: it rebuilds the entire scene
-graph from scratch every single frame.
+This issue was addressed by refactoring the renderer into persistent PixiJS
+display objects. The previous renderer fought PixiJS's retained-mode model by
+rebuilding the entire scene graph from scratch every single frame.
+
+Current state:
+
+- `src/main.ts` creates persistent map and battle render views once.
+- The ticker calls `updateMapRender()` or `updateBattleRender()` and mutates
+  retained nodes instead of clearing and rebuilding scenes.
+- Map tiles, panels, menu text, dialog text, Pokemon sprites, HP bars, move
+  effects, the sun halo, and grass shimmer are retained and updated in place.
 
 - `app.ticker.add(...)` runs ~60x/sec and calls `drawMap()` or `drawBattle()`
   each frame.
@@ -157,12 +166,25 @@ Why this is expensive (worst → least):
    background bands) instead of reusing cached geometry.
 4. `removeChildren()` discards retained GPU state Pixi is designed to keep.
 
-Fix (deferred — visual pass chose aesthetics only): build persistent objects
-once, keep references, and per frame mutate **only** what changed (position,
-alpha, `text.text`, HP-bar width, sprite offset). Build the tilemap once; reuse
-Text objects; drive ambient motion by tweening properties of persistent nodes.
-The current per-frame-rebuild is what makes the `elapsed`-clock animations cheap
-to add, but it should be replaced before the scene grows.
+Resolution: `src/main.ts` now builds persistent objects once, keeps references,
+and mutates only what changed per frame. The tilemap is built once, Text objects
+are reused, and ambient motion is driven by updating retained nodes.
+
+Review follow-up (post-refactor):
+
+- `textStyles` now holds `TextStyle` **instances**, not plain objects. `Text`
+  copies a plain object into a new `TextStyle` on assignment, so the old
+  `setTextStyle` reference guard never matched and re-rasterized ~9 labels every
+  frame. With shared instances the guard short-circuits as intended.
+- Removed dead immediate-mode background helpers (`drawBattleBackground`,
+  `drawSun`, `drawField`) left over from before the persistent-view refactor.
+
+Future rendering rule: build persistent objects once, keep references, and per
+frame mutate **only** what changed (position, alpha, `text.text`, HP-bar width,
+sprite offset, or geometry inside an existing `Graphics`). Keep the tilemap
+static, reuse Text objects, and drive ambient motion by tweening properties of
+persistent nodes. Avoid reintroducing per-frame `removeChildren()`,
+`new Text(...)`, `Sprite.from(...)`, or whole-scene rebuilds in ticker code.
 
 ## Suggested Next Steps
 
