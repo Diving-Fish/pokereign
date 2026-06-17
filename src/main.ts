@@ -9,7 +9,8 @@ import { createTileTextures, type TileTextureMap } from "./client/render/tileTex
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
-import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster, type MonsterState } from "./game/state/monster";
+import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster } from "./game/state/monster";
+import { createRunState } from "./game/state/runState";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
 import { MOVES, type MoveId } from "./game/data/moves";
 import { SPECIES, type SpeciesId } from "./game/data/species";
@@ -116,11 +117,15 @@ const textStyles = {
   panelHp: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 14, fontWeight: "700" }))
 };
 
-const playerRoster: MonsterState[] = [
-  createMonsterState("charmander", 3),
-  createMonsterState("bulbasaur", 3),
-  createMonsterState("squirtle", 3)
-];
+// The run snapshot is the source of truth the server will own: player team,
+// position, cleared encounters and seed all live here. `playerRoster` is just a
+// convenience alias onto the team so the rest of the file is unchanged.
+const runState = createRunState({
+  mapId: activeMap.id,
+  spawn: activeMap.spawn,
+  team: [createMonsterState("charmander", 3), createMonsterState("bulbasaur", 3), createMonsterState("squirtle", 3)]
+});
+const playerRoster = runState.player.team;
 
 const root = new Container();
 const sceneLayer = new Container();
@@ -139,9 +144,9 @@ const STEP_DURATION_MS = 250;
 
 const keys = new Set<string>();
 let mode: SceneMode = "map";
-let playerTile = { ...activeMap.spawn };
-let stepFrom = { ...activeMap.spawn };
-const renderPos = { x: activeMap.spawn.x, y: activeMap.spawn.y };
+let playerTile = { ...runState.player.position };
+let stepFrom = { ...runState.player.position };
+const renderPos = { x: runState.player.position.x, y: runState.player.position.y };
 let stepElapsed = 0;
 let stepping = false;
 let battle: BattleEngine | null = null;
@@ -235,6 +240,9 @@ function updateMap(deltaMs: number): void {
       stepping = false;
       renderPos.x = playerTile.x;
       renderPos.y = playerTile.y;
+      // Commit the arrived tile to the authoritative run snapshot.
+      runState.player.position.x = playerTile.x;
+      runState.player.position.y = playerTile.y;
 
       const encounter = activeMap.objects.find(
         (item) => item.kind === "encounter" && item.x === playerTile.x && item.y === playerTile.y
