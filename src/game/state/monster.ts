@@ -97,3 +97,8 @@ export function syncMonsterStateFromBattle(state: MonsterState, battle: BattleMo
   state.currentHp = battle.currentHp;
   state.status = battle.status;
 }
+
+/** XP the team earns for defeating a foe of the given in-game level (1-12). */
+export function xpRewardForDefeating(foeLevel: number): number {
+  return foeLevel * 6 + 6;
+}

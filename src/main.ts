@@ -9,7 +9,7 @@ import { createTileTextures, type TileTextureMap } from "./client/render/tileTex
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
-import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster } from "./game/state/monster";
+import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating } from "./game/state/monster";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
 import { MOVES, type MoveId } from "./game/data/moves";
@@ -153,6 +153,8 @@ let battle: BattleEngine | null = null;
 let battleView: BattleStateView | null = null;
 // Which map encounter triggered the current battle, so a win can clear it.
 let activeEncounterId: string | null = null;
+// The defeated foe's in-game level, used to compute the XP reward on victory.
+let activeFoeLevel = 0;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -274,6 +276,7 @@ function startBattle(encounter: MapEncounterObject): void {
   displayedHp.clear();
   battleIntroStart = elapsed;
   activeEncounterId = encounter.id;
+  activeFoeLevel = encounter.level;
   const foe = toBattleMonster(createMonsterState(encounter.speciesId, encounter.level), "foe");
   battleTeam = playerRoster.map((state) => toBattleMonster(state, "player"));
   battle = new BattleEngine({
@@ -352,11 +355,33 @@ function queueBattlePlayback(events: BattleEvent[], outcome: BattleOutcome): voi
 
   if (outcome === "player") {
     playbackSteps.push({ kind: "text", text: "战斗胜利！", duration: 700, elapsed: 0 });
+    const reward = grantBattleXp();
+    if (reward > 0) {
+      playbackSteps.push({ kind: "text", text: `队伍每只获得了 ${reward} 经验！`, duration: 800, elapsed: 0 });
+    }
   }
 
   if (outcome === "opponent") {
     playbackSteps.push({ kind: "text", text: "队伍全灭，返回地图。", duration: 900, elapsed: 0 });
   }
+}
+
+/**
+ * Award the foe's XP to every surviving team member (full amount each, like a
+ * party-wide Exp Share) and write it onto the persistent roster. Called once per
+ * won battle from `queueBattlePlayback`.
+ */
+function grantBattleXp(): number {
+  if (!battleTeam) {
+    return 0;
+  }
+  const reward = xpRewardForDefeating(activeFoeLevel);
+  battleTeam.forEach((monster, index) => {
+    if (monster.currentHp > 0) {
+      playerRoster[index].xp += reward;
+    }
+  });
+  return reward;
 }
 
 function eventToPlaybackSteps(event: BattleEvent): PlaybackStep[] {
