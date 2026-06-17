@@ -16,6 +16,8 @@ export type MapRenderView = {
   container: Viewport;
   viewport: Viewport;
   playerMarker: Graphics;
+  /** Live encounter markers keyed by encounter id, so cleared ones can be removed. */
+  encounterMarkers: Map<string, Graphics>;
 };
 
 /**
@@ -25,7 +27,12 @@ export type MapRenderView = {
  * into a handful of draw calls regardless of map size, so this scales to the
  * target 200x200 maps where a per-tile `Sprite` loop would not.
  */
-export function createMapRenderView(map: TileMapData, tileTextures: TileTextureMap, events: EventSystem): MapRenderView {
+export function createMapRenderView(
+  map: TileMapData,
+  tileTextures: TileTextureMap,
+  events: EventSystem,
+  clearedEncounterIds: ReadonlySet<string> = new Set()
+): MapRenderView {
   const worldWidth = map.width * map.tileSize;
   const worldHeight = map.height * map.tileSize;
 
@@ -49,12 +56,17 @@ export function createMapRenderView(map: TileMapData, tileTextures: TileTextureM
   }
   viewport.addChild(tilemap);
 
+  const encounterMarkers = new Map<string, Graphics>();
   for (const encounter of map.objects.filter((object) => object.kind === "encounter")) {
+    if (clearedEncounterIds.has(encounter.id)) {
+      continue;
+    }
     const marker = new Graphics();
     marker.rect(encounter.x * map.tileSize + 8, encounter.y * map.tileSize + 8, 16, 16);
     marker.fill(encounter.boss ? "#b32f42" : "#f4c542");
     marker.stroke({ color: "#321a1a", width: 2 });
     viewport.addChild(marker);
+    encounterMarkers.set(encounter.id, marker);
   }
 
   const playerMarker = new Graphics();
@@ -63,7 +75,18 @@ export function createMapRenderView(map: TileMapData, tileTextures: TileTextureM
   playerMarker.stroke({ color: "#f1e0b8", width: 2 });
   viewport.addChild(playerMarker);
 
-  return { container: viewport, viewport, playerMarker };
+  return { container: viewport, viewport, playerMarker, encounterMarkers };
+}
+
+/** Remove a defeated encounter's marker so it stays gone on the map. */
+export function removeEncounterMarker(view: MapRenderView, encounterId: string): void {
+  const marker = view.encounterMarkers.get(encounterId);
+  if (!marker) {
+    return;
+  }
+  view.viewport.removeChild(marker);
+  marker.destroy();
+  view.encounterMarkers.delete(encounterId);
 }
 
 /**

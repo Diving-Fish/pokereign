@@ -2,7 +2,7 @@ import { Application, Assets, Container, Graphics, Sprite, Text, TextStyle, Text
 import "./styles.css";
 import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBackgroundView } from "./client/render/battleBackground";
 import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayout";
-import { createMapRenderView, updateMapRenderView } from "./client/render/mapView";
+import { createMapRenderView, removeEncounterMarker, updateMapRenderView } from "./client/render/mapView";
 import { fitCanvasToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
@@ -10,7 +10,7 @@ import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
 import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster } from "./game/state/monster";
-import { createRunState } from "./game/state/runState";
+import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
 import { MOVES, type MoveId } from "./game/data/moves";
 import { SPECIES, type SpeciesId } from "./game/data/species";
@@ -132,7 +132,7 @@ const sceneLayer = new Container();
 app.stage.addChild(root);
 root.addChild(sceneLayer);
 
-const mapRender = createMapRenderView(activeMap, tileTextures, app.renderer.events);
+const mapRender = createMapRenderView(activeMap, tileTextures, app.renderer.events, new Set(runState.clearedEncounterIds));
 const battleRender = createBattleRenderView();
 battleRender.container.visible = false;
 sceneLayer.addChild(mapRender.container, battleRender.container);
@@ -151,6 +151,8 @@ let stepElapsed = 0;
 let stepping = false;
 let battle: BattleEngine | null = null;
 let battleView: BattleStateView | null = null;
+// Which map encounter triggered the current battle, so a win can clear it.
+let activeEncounterId: string | null = null;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -245,7 +247,11 @@ function updateMap(deltaMs: number): void {
       runState.player.position.y = playerTile.y;
 
       const encounter = activeMap.objects.find(
-        (item) => item.kind === "encounter" && item.x === playerTile.x && item.y === playerTile.y
+        (item) =>
+          item.kind === "encounter" &&
+          item.x === playerTile.x &&
+          item.y === playerTile.y &&
+          !isEncounterCleared(runState, item.id)
       );
       if (encounter) {
         startBattle(encounter);
@@ -267,6 +273,7 @@ function startBattle(encounter: MapEncounterObject): void {
   pendingOutcome = "ongoing";
   displayedHp.clear();
   battleIntroStart = elapsed;
+  activeEncounterId = encounter.id;
   const foe = toBattleMonster(createMonsterState(encounter.speciesId, encounter.level), "foe");
   battleTeam = playerRoster.map((state) => toBattleMonster(state, "player"));
   battle = new BattleEngine({
@@ -470,6 +477,13 @@ function finishBattlePlaybackIfNeeded(): void {
     if (battleTeam) {
       battleTeam.forEach((monster, index) => syncMonsterStateFromBattle(playerRoster[index], monster));
     }
+    // On a win, retire the encounter: record it in the run snapshot and drop its
+    // map marker so it stays gone when we return to the overworld.
+    if (pendingOutcome === "player" && activeEncounterId) {
+      markEncounterCleared(runState, activeEncounterId);
+      removeEncounterMarker(mapRender, activeEncounterId);
+    }
+    activeEncounterId = null;
     mode = "map";
     battle = null;
     battleView = null;
