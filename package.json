@@ -9,7 +9,9 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@pixi/tilemap": "^5.0.2",
     "@smogon/calc": "^0.11.0",
+    "pixi-viewport": "^6.0.3",
     "pixi.js": "^8.14.3"
   },
   "devDependencies": {

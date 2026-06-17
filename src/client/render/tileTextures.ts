@@ -1,23 +1,50 @@
-import { Application, Graphics, Texture } from "pixi.js";
+import { Application, CanvasSource, Graphics, Rectangle, Texture } from "pixi.js";
 import type { TileId } from "../../game/map/types";
 
 export type TileTextureMap = Record<TileId, Texture>;
 
-export function createTileTextures(app: Application, tileSize: number): TileTextureMap {
-  return {
-    grass: generateTileTexture(app, tileSize, drawGrassTile),
-    long_grass: generateTileTexture(app, tileSize, drawLongGrassTile),
-    wall: generateTileTexture(app, tileSize, drawWallTile),
-    dirt: generateTileTexture(app, tileSize, drawDirtTile),
-    center: generateTileTexture(app, tileSize, drawCenterTile),
-    boss: generateTileTexture(app, tileSize, drawBossTile)
-  };
-}
+const TILE_DRAWERS: Array<[TileId, (graphics: Graphics, tileSize: number) => void]> = [
+  ["grass", drawGrassTile],
+  ["long_grass", drawLongGrassTile],
+  ["wall", drawWallTile],
+  ["dirt", drawDirtTile],
+  ["center", drawCenterTile],
+  ["boss", drawBossTile]
+];
 
-function generateTileTexture(app: Application, tileSize: number, draw: (graphics: Graphics, tileSize: number) => void): Texture {
-  const graphics = new Graphics();
-  draw(graphics, tileSize);
-  return app.renderer.generateTexture(graphics);
+/**
+ * Bake every tile into a single horizontal canvas atlas so all tile Textures
+ * share one source. `@pixi/tilemap` samples uploaded image/canvas sources
+ * reliably, whereas a per-tile `generateTexture` RenderTexture renders black
+ * through the tilemap shader. One base texture also keeps the whole map to a
+ * single draw call.
+ */
+export function createTileTextures(app: Application, tileSize: number): TileTextureMap {
+  const atlasCanvas = document.createElement("canvas");
+  atlasCanvas.width = tileSize * TILE_DRAWERS.length;
+  atlasCanvas.height = tileSize;
+  const ctx = atlasCanvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Failed to get 2D context for tile atlas.");
+  }
+
+  TILE_DRAWERS.forEach(([, draw], index) => {
+    const graphics = new Graphics();
+    draw(graphics, tileSize);
+    const tileCanvas = app.renderer.extract.canvas({
+      target: graphics,
+      frame: new Rectangle(0, 0, tileSize, tileSize)
+    });
+    ctx.drawImage(tileCanvas as CanvasImageSource, index * tileSize, 0);
+    graphics.destroy();
+  });
+
+  const source = new CanvasSource({ resource: atlasCanvas, scaleMode: "nearest" });
+  const textures = {} as TileTextureMap;
+  TILE_DRAWERS.forEach(([id], index) => {
+    textures[id] = new Texture({ source, frame: new Rectangle(index * tileSize, 0, tileSize, tileSize) });
+  });
+  return textures;
 }
 
 function drawGrassTile(graphics: Graphics, tileSize: number): void {

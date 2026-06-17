@@ -30,10 +30,68 @@
 ### Map Prototype
 
 - Data-driven map schema under `src/game/map`.
-- Prototype map stored in `src/game/map/prototypeMap.ts`.
+- Prototype map stored in `src/game/map/prototypeMap.ts`: now a 200x200 field
+  (the design-doc target size) generated deterministically (seeded LCG) with a
+  walled border, scattered long-grass/rock/dirt, crossroads through spawn, and
+  ~60 scattered visible encounters. Spawn is map center `(100, 100)`.
 - Tile definitions include collision metadata.
+- Player movement is grid-locked and smooth: one tile per step, no diagonals
+  (horizontal wins when both axes are held), 250 ms per tile = 4 tiles/sec
+  (tuned up from the design doc's 2.5). The on-screen position is interpolated across each step
+  (`renderPos`), and held keys chain steps with leftover-time carryover so
+  walking is a steady glide. Encounters trigger on step arrival. The camera
+  follows `renderPos`, so it glides too.
 - Map objects support visible encounter objects.
-- Current tile rendering uses generated pixel textures, ready to swap to an atlas later.
+- Tile textures are baked into a single canvas atlas (`tileTextures.ts`): each
+  tile is drawn with `Graphics`, extracted to a canvas via `extract.canvas`, and
+  composited into one `CanvasSource`; tile Textures are frames of that source.
+  One shared base texture keeps the map to a single draw call and stays crisp
+  with `scaleMode: "nearest"`.
+- IMPORTANT `@pixi/tilemap` gotcha: a single `Tilemap` shares one quad index
+  buffer that defaults to **16-bit** indices, capping at ~16K tiles (65536/4).
+  Our 200x200 map has 40K tiles, so it silently overflowed and rendered only the
+  first ~16K — which, with the camera centered at row 100, was entirely
+  off-screen, so the map looked all-black. Fixed by setting
+  `settings.use32bitIndex = true` (in `mapView.ts`, before the pipe builds);
+  WebGL2 and WebGPU both support 32-bit indices. Verified in-browser via the
+  chrome-devtools MCP. (The canvas atlas was not the fix — it is an independent
+  cleanup; an earlier note wrongly blamed RenderTextures.)
+- Tiles render through `@pixi/tilemap` `CompositeTilemap`: the whole ground layer
+  is filled once into a batched tilemap (a few draw calls regardless of tile
+  count), so this scales to the target 200x200 maps. Replaced the old per-tile
+  `new Sprite` loop.
+- Camera uses `pixi-viewport` (`Viewport`), following the player via
+  `moveCenter` with `clamp({ direction: "all", underflow: "center" })` so it
+  stays inside the map (and centers maps smaller than the screen). Replaced the
+  old manual `world.x/y` centering.
+- Map render code lives in `src/client/render/mapView.ts`
+  (`createMapRenderView` / `updateMapRenderView`), mirroring the battle render
+  module split. Scene visibility toggling moved to the `main.ts` ticker.
+
+### Run State (server-sync foundation)
+
+This is being built for a future server-authoritative model: the server will own
+the run state, so it must stay plain and serializable.
+
+- Sync design rules:
+  1. Store only **source-of-truth** fields; recompute derived values locally so
+     they never desync and stay out of the sync payload.
+  2. State transitions go through pure functions that return events (the battle
+     engine already returns events); render code never mutates authoritative
+     state directly.
+  3. Determinism: seeded RNG + stable ids (not yet done — see follow-ups).
+- Slice A (done): `src/game/state/monster.ts` introduces `MonsterState`, the
+  authoritative serializable monster: `instanceId, speciesId, level, xp, ivs,
+  evs, nature, status, currentHp, moves`. Derived fields (`stats, maxHp,
+  calcLevel, types, name`) are NOT stored — `toBattleMonster(state, side)`
+  recomputes them for battle, and `syncMonsterStateFromBattle` writes HP/status
+  back afterward. `evs` is stored per-monster (flat 85 for now) so a future EV
+  system needs no calc/plumbing changes. `createMonster.ts` was removed; the
+  player roster is now `MonsterState[]`, materialized per battle and written back
+  on battle end. `computeStats`/`smogonCalc` take `evs` as a parameter.
+- Follow-ups before capture / server authority: replace `Math.random()` damage
+  rolls in `smogonCalc` and the local `instanceId` counter with seeded
+  RNG / server-assigned ids routed through the run state.
 
 ### Battle System
 
@@ -115,6 +173,7 @@
 - `src/game/data/art.ts`: Pokemon sprite URL generation.
 - `src/game/map/prototypeMap.ts`: Current map data.
 - `src/game/map/tiles.ts`: Tile definitions.
+- `src/client/render/mapView.ts`: Tilemap (`@pixi/tilemap`) + camera (`pixi-viewport`) map render view.
 - `src/client/render/battleLayout.ts`: Battle platform, panel, and sprite layout.
 - `src/client/render/battleBackground.ts`: Layered golden-hour battlefield.
 - `src/client/render/theme.ts`: Shared palette, pixel font stack, text-style factory.

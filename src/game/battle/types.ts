@@ -26,6 +26,7 @@ export type BattleMonster = {
   /** Actual 1-100 level fed to @smogon/calc (level coefficient × 50). */
   calcLevel: number;
   ivs: Stats;
+  evs: Stats;
   nature: string;
   status: BattleStatus | null;
   maxHp: number;

@@ -6,9 +6,6 @@ import type { BattleFieldState, BattleMonster } from "./types";
 
 const GEN = Generations.get(9);
 
-/** Effort values are fixed at 85 across the board for every battler. */
-const EVS: Stats = { hp: 85, atk: 85, def: 85, spa: 85, spd: 85, spe: 85 };
-
 /**
  * In-game level (1-12) → level coefficient. The coefficient maps onto a real
  * 1-100 level via `coefficient × 50` (e.g. 1.2 → level 60).
@@ -66,6 +63,7 @@ export function computeStats(
   speciesId: SpeciesId,
   calcLevel: number,
   ivs: Stats,
+  evs: Stats,
   nature: string
 ): { stats: Stats; maxHp: number } {
   const species = SPECIES[speciesId];
@@ -73,7 +71,7 @@ export function computeStats(
     level: calcLevel,
     nature,
     ivs,
-    evs: EVS,
+    evs,
     ability: species.ability
   });
   return {
@@ -95,7 +93,7 @@ function toPokemon(monster: BattleMonster): Pokemon {
     level: monster.calcLevel,
     nature: monster.nature,
     ivs: monster.ivs,
-    evs: EVS,
+    evs: monster.evs,
     ability: species.ability,
     boosts: {
       atk: monster.statStages.atk,

@@ -2,13 +2,14 @@ import { Application, Assets, Container, Graphics, Sprite, Text, TextStyle, Text
 import "./styles.css";
 import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBackgroundView } from "./client/render/battleBackground";
 import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayout";
+import { createMapRenderView, updateMapRenderView } from "./client/render/mapView";
 import { fitCanvasToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
-import { createMonster } from "./game/battle/createMonster";
 import { moveMeta } from "./game/battle/smogonCalc";
-import type { BattleCommand, BattleEvent, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
+import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
+import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster, type MonsterState } from "./game/state/monster";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
 import { MOVES, type MoveId } from "./game/data/moves";
 import { SPECIES, type SpeciesId } from "./game/data/species";
@@ -34,11 +35,6 @@ type PlaybackStep =
   | { kind: "text"; text: string; duration: number; elapsed: number }
   | { kind: "move"; event: BattleMoveEvent; duration: number; elapsed: number }
   | { kind: "hp"; tween: HpTween };
-type MapRenderView = {
-  container: Container;
-  world: Container;
-  playerMarker: Graphics;
-};
 type HpBarView = {
   fill: Graphics;
 };
@@ -120,10 +116,10 @@ const textStyles = {
   panelHp: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 14, fontWeight: "700" }))
 };
 
-const playerRoster = [
-  createMonster("charmander", 3),
-  createMonster("bulbasaur", 3),
-  createMonster("squirtle", 3)
+const playerRoster: MonsterState[] = [
+  createMonsterState("charmander", 3),
+  createMonsterState("bulbasaur", 3),
+  createMonsterState("squirtle", 3)
 ];
 
 const root = new Container();
@@ -131,16 +127,28 @@ const sceneLayer = new Container();
 app.stage.addChild(root);
 root.addChild(sceneLayer);
 
-const mapRender = createMapRenderView();
+const mapRender = createMapRenderView(activeMap, tileTextures, app.renderer.events);
 const battleRender = createBattleRenderView();
 battleRender.container.visible = false;
 sceneLayer.addChild(mapRender.container, battleRender.container);
 
+// 4 tiles/sec → 250 ms per tile. Movement is grid-locked: one tile per step,
+// no diagonals, with the on-screen position interpolated across the step so the
+// player and camera glide instead of snapping.
+const STEP_DURATION_MS = 250;
+
 const keys = new Set<string>();
 let mode: SceneMode = "map";
 let playerTile = { ...activeMap.spawn };
+let stepFrom = { ...activeMap.spawn };
+const renderPos = { x: activeMap.spawn.x, y: activeMap.spawn.y };
+let stepElapsed = 0;
+let stepping = false;
 let battle: BattleEngine | null = null;
 let battleView: BattleStateView | null = null;
+// Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
+// and status can be written back to the persistent state when the battle ends.
+let battleTeam: BattleMonster[] | null = null;
 let message = "方向键/WASD 移动，踩到标记进入 1v1 战斗。";
 let selectedMoveIndex = 0;
 let selectedPokemonIndex = 0;
@@ -156,7 +164,6 @@ let elapsed = 0;
 let battleIntroStart = 0;
 let shakeUntil = 0;
 let shakeMag = 0;
-let moveCooldown = 0;
 
 window.addEventListener("keydown", (event) => {
   keys.add(event.key.toLowerCase());
@@ -178,26 +185,64 @@ function isBlocked(x: number, y: number): boolean {
   return TILE_DEFINITIONS[tileAt(x, y)].blocksMovement;
 }
 
+/** One axis at a time (no diagonals); horizontal wins when both are held. */
+function readMoveDir(): { x: number; y: number } | null {
+  if (keys.has("arrowleft") || keys.has("a")) {
+    return { x: -1, y: 0 };
+  }
+  if (keys.has("arrowright") || keys.has("d")) {
+    return { x: 1, y: 0 };
+  }
+  if (keys.has("arrowup") || keys.has("w")) {
+    return { x: 0, y: -1 };
+  }
+  if (keys.has("arrowdown") || keys.has("s")) {
+    return { x: 0, y: 1 };
+  }
+  return null;
+}
+
 function updateMap(deltaMs: number): void {
-  moveCooldown -= deltaMs;
-  if (moveCooldown > 0) {
-    return;
-  }
+  // Consume the frame's time across one or more tile steps so holding a key
+  // walks at a steady 2.5 tiles/sec with no per-tile micro-pause.
+  let remaining = deltaMs;
 
-  const dx = keys.has("arrowleft") || keys.has("a") ? -1 : keys.has("arrowright") || keys.has("d") ? 1 : 0;
-  const dy = keys.has("arrowup") || keys.has("w") ? -1 : keys.has("arrowdown") || keys.has("s") ? 1 : 0;
-  if (dx === 0 && dy === 0) {
-    return;
-  }
+  while (remaining > 0) {
+    if (!stepping) {
+      const dir = readMoveDir();
+      if (!dir) {
+        return;
+      }
+      const next = { x: playerTile.x + dir.x, y: playerTile.y + dir.y };
+      if (isBlocked(next.x, next.y)) {
+        return;
+      }
+      stepFrom = { ...playerTile };
+      playerTile = next;
+      stepElapsed = 0;
+      stepping = true;
+    }
 
-  const next = { x: playerTile.x + dx, y: playerTile.y + dy };
-  if (!isBlocked(next.x, next.y)) {
-    playerTile = next;
-    moveCooldown = 140;
+    const consumed = Math.min(remaining, STEP_DURATION_MS - stepElapsed);
+    stepElapsed += consumed;
+    remaining -= consumed;
 
-    const encounter = activeMap.objects.find((item) => item.kind === "encounter" && item.x === playerTile.x && item.y === playerTile.y);
-    if (encounter) {
-      startBattle(encounter);
+    const t = stepElapsed / STEP_DURATION_MS;
+    renderPos.x = lerp(stepFrom.x, playerTile.x, t);
+    renderPos.y = lerp(stepFrom.y, playerTile.y, t);
+
+    if (stepElapsed >= STEP_DURATION_MS) {
+      stepping = false;
+      renderPos.x = playerTile.x;
+      renderPos.y = playerTile.y;
+
+      const encounter = activeMap.objects.find(
+        (item) => item.kind === "encounter" && item.x === playerTile.x && item.y === playerTile.y
+      );
+      if (encounter) {
+        startBattle(encounter);
+        return;
+      }
     }
   }
 }
@@ -214,9 +259,10 @@ function startBattle(encounter: MapEncounterObject): void {
   pendingOutcome = "ongoing";
   displayedHp.clear();
   battleIntroStart = elapsed;
-  const foe = createMonster(encounter.speciesId, encounter.level, "foe");
+  const foe = toBattleMonster(createMonsterState(encounter.speciesId, encounter.level), "foe");
+  battleTeam = playerRoster.map((state) => toBattleMonster(state, "player"));
   battle = new BattleEngine({
-    playerRoster,
+    playerRoster: battleTeam,
     opponentRoster: [foe]
   });
   battleView = battle.view();
@@ -411,53 +457,19 @@ function finishBattlePlaybackIfNeeded(): void {
   }
 
   if (pendingOutcome === "player" || pendingOutcome === "opponent") {
+    // Persist final HP/status from the materialized battle team back onto the
+    // authoritative roster before tearing the battle down.
+    if (battleTeam) {
+      battleTeam.forEach((monster, index) => syncMonsterStateFromBattle(playerRoster[index], monster));
+    }
     mode = "map";
     battle = null;
     battleView = null;
+    battleTeam = null;
     displayedHp.clear();
     message = "方向键/WASD 移动，踩到标记进入 1v1 战斗。";
     pendingOutcome = "ongoing";
   }
-}
-
-function createMapRenderView(): MapRenderView {
-  const container = new Container();
-  const world = new Container();
-  container.addChild(world);
-
-  for (let y = 0; y < activeMap.height; y += 1) {
-    for (let x = 0; x < activeMap.width; x += 1) {
-      const tile = new Sprite(tileTextures[tileAt(x, y)]);
-      tile.x = x * activeMap.tileSize;
-      tile.y = y * activeMap.tileSize;
-      world.addChild(tile);
-    }
-  }
-
-  for (const encounter of activeMap.objects.filter((object) => object.kind === "encounter")) {
-    const marker = new Graphics();
-    marker.rect(encounter.x * activeMap.tileSize + 8, encounter.y * activeMap.tileSize + 8, 16, 16);
-    marker.fill(encounter.boss ? "#b32f42" : "#f4c542");
-    marker.stroke({ color: "#321a1a", width: 2 });
-    world.addChild(marker);
-  }
-
-  const playerMarker = new Graphics();
-  playerMarker.rect(8, 4, 16, 24);
-  playerMarker.fill("#3157a4");
-  playerMarker.stroke({ color: "#f1e0b8", width: 2 });
-  world.addChild(playerMarker);
-
-  return { container, world, playerMarker };
-}
-
-function updateMapRender(): void {
-  mapRender.container.visible = true;
-  battleRender.container.visible = false;
-  mapRender.playerMarker.x = playerTile.x * activeMap.tileSize;
-  mapRender.playerMarker.y = playerTile.y * activeMap.tileSize;
-  mapRender.world.x = Math.floor(GAME_WIDTH / 2 - playerTile.x * activeMap.tileSize - activeMap.tileSize / 2);
-  mapRender.world.y = Math.floor(GAME_HEIGHT / 2 - playerTile.y * activeMap.tileSize - activeMap.tileSize / 2);
 }
 
 function createBattleRenderView(): BattleRenderView {
@@ -632,8 +644,6 @@ function updateBattleRender(): void {
     return;
   }
 
-  mapRender.container.visible = false;
-  battleRender.container.visible = true;
   updateBattleBackgroundView(battleRender.background, elapsed);
 
   const player = battleView.player.active;
@@ -884,10 +894,14 @@ app.ticker.add((ticker) => {
   elapsed += ticker.deltaMS / 1000;
 
   if (mode === "map") {
+    mapRender.container.visible = true;
+    battleRender.container.visible = false;
     sceneLayer.position.set(0, 0);
     updateMap(ticker.deltaMS);
-    updateMapRender();
+    updateMapRenderView(mapRender, activeMap, renderPos);
   } else {
+    mapRender.container.visible = false;
+    battleRender.container.visible = true;
     applyScreenShake();
     updateBattlePlayback(ticker.deltaMS);
     updateBattleRender();
