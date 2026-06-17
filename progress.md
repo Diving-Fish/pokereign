@@ -89,9 +89,30 @@ the run state, so it must stay plain and serializable.
   system needs no calc/plumbing changes. `createMonster.ts` was removed; the
   player roster is now `MonsterState[]`, materialized per battle and written back
   on battle end. `computeStats`/`smogonCalc` take `evs` as a parameter.
+- Slice B (done): `src/game/state/runState.ts` introduces `RunState`, the full
+  serializable run snapshot the server will own: `seed, mapId,
+  clearedEncounterIds, player{ position, team }`. `main.ts` reads/writes the
+  player team and position through it (`playerRoster` is just an alias onto
+  `player.team`). `src/game/state/rng.ts` adds a seeded `Rng` (deterministic
+  LCG; only `state` is serializable) for the damage-roll / sync follow-ups —
+  not wired in yet.
+- Slice C (done): on a battle win the encounter id is recorded in
+  `clearedEncounterIds` and its map marker removed (`removeEncounterMarker`).
+  Cleared tiles no longer re-trigger battles, and `createMapRenderView` skips
+  already-cleared markers when built (so a resumed run renders correctly).
+- Slice D (done): defeating a foe awards level-based XP
+  (`xpRewardForDefeating`) to every surviving team member (full amount each,
+  party-wide), written onto the roster with a reward line in the victory
+  sequence.
+- Slice E (done): `applyLevelUps` spends accumulated XP to advance levels
+  (`xpToNextLevel`, capped at `MAX_LEVEL` = 12), rescaling `currentHp` to keep
+  the pre-level HP ratio; stats are derived so nothing else is stored. The
+  victory flow now persists battle HP **before** granting XP/levels (so the
+  HP rescale uses the post-battle value), then teardown only retires the
+  encounter.
 - Follow-ups before capture / server authority: replace `Math.random()` damage
-  rolls in `smogonCalc` and the local `instanceId` counter with seeded
-  RNG / server-assigned ids routed through the run state.
+  rolls in `smogonCalc` and the local `instanceId` counter with the seeded
+  `Rng` / server-assigned ids routed through the run state.
 
 ### Battle System
 

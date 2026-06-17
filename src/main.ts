@@ -9,7 +9,7 @@ import { createTileTextures, type TileTextureMap } from "./client/render/tileTex
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
-import { createMonsterState, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating } from "./game/state/monster";
+import { applyLevelUps, createMonsterState, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating } from "./game/state/monster";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
 import { MOVES, type MoveId } from "./game/data/moves";
@@ -353,11 +353,20 @@ function queueBattlePlayback(events: BattleEvent[], outcome: BattleOutcome): voi
   pendingOutcome = outcome;
   playbackSteps = events.flatMap((event) => eventToPlaybackSteps(event));
 
+  // A terminal outcome means battle HP/status is final: persist it now so the
+  // XP/level-up that follows rescales HP against the correct post-battle value.
+  if (outcome === "player" || outcome === "opponent") {
+    persistBattleResult();
+  }
+
   if (outcome === "player") {
     playbackSteps.push({ kind: "text", text: "战斗胜利！", duration: 700, elapsed: 0 });
     const reward = grantBattleXp();
     if (reward > 0) {
       playbackSteps.push({ kind: "text", text: `队伍每只获得了 ${reward} 经验！`, duration: 800, elapsed: 0 });
+    }
+    for (const text of applyTeamLevelUps()) {
+      playbackSteps.push({ kind: "text", text, duration: 800, elapsed: 0 });
     }
   }
 
@@ -366,22 +375,38 @@ function queueBattlePlayback(events: BattleEvent[], outcome: BattleOutcome): voi
   }
 }
 
+/** Write each battler's final HP/status back onto the persistent roster. */
+function persistBattleResult(): void {
+  if (battleTeam) {
+    battleTeam.forEach((monster, index) => syncMonsterStateFromBattle(playerRoster[index], monster));
+  }
+}
+
 /**
  * Award the foe's XP to every surviving team member (full amount each, like a
- * party-wide Exp Share) and write it onto the persistent roster. Called once per
- * won battle from `queueBattlePlayback`.
+ * party-wide Exp Share). Runs after `persistBattleResult`, so HP reflects the
+ * battle outcome. Called once per won battle from `queueBattlePlayback`.
  */
 function grantBattleXp(): number {
-  if (!battleTeam) {
-    return 0;
-  }
   const reward = xpRewardForDefeating(activeFoeLevel);
-  battleTeam.forEach((monster, index) => {
+  for (const monster of playerRoster) {
     if (monster.currentHp > 0) {
-      playerRoster[index].xp += reward;
+      monster.xp += reward;
     }
-  });
+  }
   return reward;
+}
+
+/** Spend freshly-earned XP into level-ups, returning a message per level gained. */
+function applyTeamLevelUps(): string[] {
+  const messages: string[] = [];
+  for (const monster of playerRoster) {
+    const result = applyLevelUps(monster);
+    if (result.leveledUp) {
+      messages.push(`${SPECIES[monster.speciesId].name} 升到了 Lv.${result.to}！`);
+    }
+  }
+  return messages;
 }
 
 function eventToPlaybackSteps(event: BattleEvent): PlaybackStep[] {
@@ -497,13 +522,10 @@ function finishBattlePlaybackIfNeeded(): void {
   }
 
   if (pendingOutcome === "player" || pendingOutcome === "opponent") {
-    // Persist final HP/status from the materialized battle team back onto the
-    // authoritative roster before tearing the battle down.
-    if (battleTeam) {
-      battleTeam.forEach((monster, index) => syncMonsterStateFromBattle(playerRoster[index], monster));
-    }
-    // On a win, retire the encounter: record it in the run snapshot and drop its
-    // map marker so it stays gone when we return to the overworld.
+    // HP/status, XP and level-ups were already persisted when the outcome was
+    // queued; here we only retire the encounter and tear the battle down.
+    // On a win, record it in the run snapshot and drop its map marker so it
+    // stays gone when we return to the overworld.
     if (pendingOutcome === "player" && activeEncounterId) {
       markEncounterCleared(runState, activeEncounterId);
       removeEncounterMarker(mapRender, activeEncounterId);

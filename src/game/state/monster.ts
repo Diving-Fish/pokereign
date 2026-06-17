@@ -13,6 +13,9 @@ export const DEFAULT_IVS: Stats = { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, 
 export const DEFAULT_EVS: Stats = { hp: 85, atk: 85, def: 85, spa: 85, spd: 85, spe: 85 };
 export const DEFAULT_NATURE = "Hardy";
 
+/** In-game level ceiling (matches the level-coefficient table in smogonCalc). */
+export const MAX_LEVEL = 12;
+
 /**
  * Authoritative, serializable form of a monster: only source-of-truth fields
  * that the server will own. Derived values (stats, maxHp, calcLevel, types,
@@ -101,4 +104,46 @@ export function syncMonsterStateFromBattle(state: MonsterState, battle: BattleMo
 /** XP the team earns for defeating a foe of the given in-game level (1-12). */
 export function xpRewardForDefeating(foeLevel: number): number {
   return foeLevel * 6 + 6;
+}
+
+/** XP required to advance from `level` to `level + 1`. */
+export function xpToNextLevel(level: number): number {
+  return level * 12 + 8;
+}
+
+function maxHpAt(state: MonsterState): number {
+  return computeStats(state.speciesId, toCalcLevel(state.level), state.ivs, state.evs, state.nature).maxHp;
+}
+
+export type LevelUpResult = {
+  leveledUp: boolean;
+  /** Level before applying XP. */
+  from: number;
+  /** Level after applying XP. */
+  to: number;
+};
+
+/**
+ * Spend accumulated XP to advance levels (capped at {@link MAX_LEVEL}). Stats are
+ * derived, so only `level`/`xp` change here; `currentHp` is rescaled to preserve
+ * the pre-level HP ratio against the new (higher) max. A fainted monster stays
+ * fainted. Call this *after* the battle's final HP has been written back.
+ */
+export function applyLevelUps(state: MonsterState): LevelUpResult {
+  const from = state.level;
+  if (state.level >= MAX_LEVEL) {
+    return { leveledUp: false, from, to: from };
+  }
+
+  const ratio = state.currentHp / maxHpAt(state);
+  while (state.level < MAX_LEVEL && state.xp >= xpToNextLevel(state.level)) {
+    state.xp -= xpToNextLevel(state.level);
+    state.level += 1;
+  }
+
+  const to = state.level;
+  if (to > from && state.currentHp > 0) {
+    state.currentHp = Math.max(1, Math.round(ratio * maxHpAt(state)));
+  }
+  return { leveledUp: to > from, from, to };
 }
