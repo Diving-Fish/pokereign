@@ -2,27 +2,29 @@ import { SPECIES, type SpeciesId } from "../data/species";
 import type { MoveId } from "../data/moves";
 import type { Stats } from "../data/types";
 import type { BattleMonster, BattleSide } from "./types";
+import { computeStats, toCalcLevel } from "./smogonCalc";
 
-const LEVEL_MULTIPLIER: Record<number, number> = {
-  1: 0.55,
-  2: 0.6,
-  3: 0.66,
-  4: 0.72,
-  5: 0.78,
-  6: 0.84,
-  7: 0.9,
-  8: 0.96,
-  9: 1.02,
-  10: 1.08,
-  11: 1.14,
-  12: 1.2
+const DEFAULT_IVS: Stats = { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 };
+const DEFAULT_NATURE = "Hardy";
+
+type CreateMonsterOptions = {
+  ivs?: Stats;
+  nature?: string;
 };
 
 let nextInstanceId = 1;
 
-export function createMonster(speciesId: SpeciesId, level: number, side: BattleSide = "player"): BattleMonster {
+export function createMonster(
+  speciesId: SpeciesId,
+  level: number,
+  side: BattleSide = "player",
+  options: CreateMonsterOptions = {}
+): BattleMonster {
   const species = SPECIES[speciesId];
-  const stats = calculateStats(species.baseStats, level);
+  const ivs = options.ivs ?? DEFAULT_IVS;
+  const nature = options.nature ?? DEFAULT_NATURE;
+  const calcLevel = toCalcLevel(level);
+  const { stats, maxHp } = computeStats(speciesId, calcLevel, ivs, nature);
 
   return {
     instanceId: `${side}-${speciesId}-${nextInstanceId++}`,
@@ -31,8 +33,12 @@ export function createMonster(speciesId: SpeciesId, level: number, side: BattleS
     name: species.name,
     types: species.types,
     level,
-    maxHp: stats.hp,
-    currentHp: stats.hp,
+    calcLevel,
+    ivs,
+    nature,
+    status: null,
+    maxHp,
+    currentHp: maxHp,
     stats,
     moves: species.defaultMoves.slice(0, 4) as MoveId[],
     statStages: {
@@ -44,20 +50,4 @@ export function createMonster(speciesId: SpeciesId, level: number, side: BattleS
       accuracy: 0
     }
   };
-}
-
-function calculateStats(baseStats: Stats, level: number): Stats {
-  const multiplier = LEVEL_MULTIPLIER[level] ?? LEVEL_MULTIPLIER[12];
-  return {
-    hp: Math.round((65.5 + baseStats.hp) * multiplier + 5),
-    atk: calculateNonHp(baseStats.atk, multiplier),
-    def: calculateNonHp(baseStats.def, multiplier),
-    spa: calculateNonHp(baseStats.spa, multiplier),
-    spd: calculateNonHp(baseStats.spd, multiplier),
-    spe: calculateNonHp(baseStats.spe, multiplier)
-  };
-}
-
-function calculateNonHp(base: number, multiplier: number): number {
-  return Math.round((15.5 + base) * multiplier + 5);
 }

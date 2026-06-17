@@ -7,6 +7,7 @@ import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { createMonster } from "./game/battle/createMonster";
+import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
 import { MOVES, type MoveId } from "./game/data/moves";
@@ -761,9 +762,10 @@ function updateMoveOptions(dialog: BattleDialogView, visible: boolean): void {
     text.y = rowY;
     meta.x = rowX + 150;
     meta.y = rowY + 5;
+    const info = moveMeta(moveId);
     setText(text, move.name);
     setTextStyle(text, selected ? textStyles.moveSelected : textStyles.move);
-    setText(meta, `${localizeElementType(move.type)} / ${localizeMoveCategory(move.category)}`);
+    setText(meta, `${localizeElementType(info.type)} / ${localizeMoveCategory(info.category)}`);
     if (visible && selected) {
       drawCaret(dialog.optionCaret, rowX - 18, rowY + 6);
     }
@@ -947,17 +949,17 @@ function getDisplayedHp(instanceId: string, fallbackHp: number): number {
 }
 
 function getMoveColor(moveId: MoveId): string {
-  const move = MOVES[moveId];
-  if (move.type === "fire") {
+  const type = moveMeta(moveId).type;
+  if (type === "fire") {
     return "#f16b3f";
   }
-  if (move.type === "water") {
+  if (type === "water") {
     return "#4f9fe8";
   }
-  if (move.type === "grass") {
+  if (type === "grass") {
     return "#69b95b";
   }
-  if (move.type === "ground" || move.type === "rock") {
+  if (type === "ground" || type === "rock") {
     return "#b08a55";
   }
   return "#d8d8d8";

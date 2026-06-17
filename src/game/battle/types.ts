@@ -4,13 +4,30 @@ import type { SpeciesId } from "../data/species";
 
 export type BattleSide = "player" | "foe";
 
+/** Non-volatile status conditions understood by @smogon/calc. */
+export type BattleStatus = "brn" | "par" | "psn" | "tox" | "slp" | "frz";
+
+export type BattleWeather = "Sun" | "Rain" | "Sand" | "Snow" | "Hail";
+export type BattleTerrain = "Electric" | "Grassy" | "Misty" | "Psychic";
+
+export type BattleFieldState = {
+  weather?: BattleWeather;
+  terrain?: BattleTerrain;
+};
+
 export type BattleMonster = {
   instanceId: string;
   side: BattleSide;
   speciesId: SpeciesId;
   name: string;
   types: ElementType[];
+  /** In-game level (1-12), used for display and evolution. */
   level: number;
+  /** Actual 1-100 level fed to @smogon/calc (level coefficient × 50). */
+  calcLevel: number;
+  ivs: Stats;
+  nature: string;
+  status: BattleStatus | null;
   maxHp: number;
   currentHp: number;
   stats: Stats;

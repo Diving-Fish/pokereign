@@ -12,6 +12,7 @@ export const SPECIES = {
     name: "小火龙",
     types: ["fire"],
     baseStats: { hp: 39, atk: 52, def: 43, spa: 60, spd: 50, spe: 65 },
+    ability: "Blaze",
     defaultMoves: ["scratch", "ember", "smokescreen"],
     evolutions: [{ targetSpeciesId: "charmeleon", requiredLevel: 4 }]
   },
@@ -26,6 +27,7 @@ export const SPECIES = {
     name: "火恐龙",
     types: ["fire"],
     baseStats: { hp: 58, atk: 64, def: 58, spa: 80, spd: 65, spe: 80 },
+    ability: "Blaze",
     defaultMoves: ["scratch", "ember", "flameBurst"]
   },
   bulbasaur: {
@@ -39,6 +41,7 @@ export const SPECIES = {
     name: "妙蛙种子",
     types: ["grass"],
     baseStats: { hp: 45, atk: 49, def: 49, spa: 65, spd: 65, spe: 45 },
+    ability: "Overgrow",
     defaultMoves: ["tackle", "vineWhip", "growl"]
   },
   squirtle: {
@@ -52,6 +55,7 @@ export const SPECIES = {
     name: "杰尼龟",
     types: ["water"],
     baseStats: { hp: 44, atk: 48, def: 65, spa: 50, spd: 64, spe: 43 },
+    ability: "Torrent",
     defaultMoves: ["tackle", "waterGun", "withdraw"]
   }
 } satisfies Record<string, MonsterSpecies>;

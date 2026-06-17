@@ -1,22 +1,33 @@
 import { MOVES, type MoveId } from "../data/moves";
-import type { Move } from "../data/types";
+import type { ElementType, Move } from "../data/types";
 import { typeEffectiveness } from "./typeChart";
-import type { BattleCommand, BattleEvent, BattleMonster, BattleStateView, BattleTurnResult } from "./types";
+import { moveMeta, simulateDamage } from "./smogonCalc";
+import type {
+  BattleCommand,
+  BattleEvent,
+  BattleFieldState,
+  BattleMonster,
+  BattleStateView,
+  BattleTurnResult
+} from "./types";
 
 type BattleEngineOptions = {
   playerRoster: BattleMonster[];
   opponentRoster: BattleMonster[];
+  field?: BattleFieldState;
 };
 
 export class BattleEngine {
   private playerRoster: BattleMonster[];
   private opponentRoster: BattleMonster[];
+  private field: BattleFieldState;
   private playerActiveIndex = 0;
   private opponentActiveIndex = 0;
 
   constructor(options: BattleEngineOptions) {
     this.playerRoster = options.playerRoster;
     this.opponentRoster = options.opponentRoster;
+    this.field = options.field ?? {};
   }
 
   view(): BattleStateView {
@@ -91,7 +102,7 @@ export class BattleEngine {
 
   private pickOpponentCommand(): { type: "move"; moveId: MoveId } {
     const active = this.opponentRoster[this.opponentActiveIndex];
-    const damagingMove = active.moves.find((moveId) => MOVES[moveId].power > 0) ?? active.moves[0];
+    const damagingMove = active.moves.find((moveId) => moveMeta(moveId).category !== "status") ?? active.moves[0];
     return { type: "move", moveId: damagingMove };
   }
 
@@ -101,6 +112,7 @@ export class BattleEngine {
     }
 
     const move = MOVES[moveId];
+    const meta = moveMeta(moveId);
     log.push(`${user.name} 使用了 ${move.name}。`);
     events.push({
       type: "move",
@@ -115,23 +127,23 @@ export class BattleEngine {
       animation: move.animation
     });
 
-    if (Math.random() * 100 > adjustedAccuracy(move, user)) {
+    if (Math.random() * 100 > adjustedAccuracy(meta.accuracy, user)) {
       log.push("但是没有命中。");
       events.push({ type: "message", text: "但是没有命中。" });
       return;
     }
 
-    if (move.category === "status") {
+    if (meta.category === "status") {
       this.applyStatusMove(move, user, target, log, events);
       return;
     }
 
     const hpBefore = target.currentHp;
-    const damage = calculateDamage(user, target, move);
+    const damage = simulateDamage(user, target, moveId, this.field);
     target.currentHp = Math.max(0, target.currentHp - damage);
     log.push(`${target.name} 受到了 ${damage} 点伤害。`);
 
-    const effectiveness = typeEffectiveness(move.type, target.types);
+    const effectiveness = typeEffectiveness(meta.type as ElementType, target.types);
     events.push({
       type: "damage",
       targetId: target.instanceId,
@@ -225,17 +237,8 @@ function effectiveSpeed(monster: BattleMonster): number {
   return monster.stats.spe * stageMultiplier(monster.statStages.spe);
 }
 
-function adjustedAccuracy(move: Move, user: BattleMonster): number {
-  return move.accuracy * stageMultiplier(user.statStages.accuracy);
-}
-
-function calculateDamage(user: BattleMonster, target: BattleMonster, move: Move): number {
-  const attack = move.category === "physical" ? user.stats.atk : user.stats.spa;
-  const defense = move.category === "physical" ? target.stats.def : target.stats.spd;
-  const stab = user.types.includes(move.type) ? 1.5 : 1;
-  const effectiveness = typeEffectiveness(move.type, target.types);
-  const base = (((2 * user.level) / 5 + 2) * move.power * (attack / Math.max(1, defense))) / 12 + 2;
-  return Math.max(1, Math.floor(base * stab * effectiveness));
+function adjustedAccuracy(baseAccuracy: number, user: BattleMonster): number {
+  return baseAccuracy * stageMultiplier(user.statStages.accuracy);
 }
 
 function stageMultiplier(stage: number): number {

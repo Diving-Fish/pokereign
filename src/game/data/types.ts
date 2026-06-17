@@ -25,6 +25,8 @@ export type MonsterSpecies = {
   name: string;
   types: ElementType[];
   baseStats: Stats;
+  /** Canonical (@smogon/calc) ability name, e.g. "Blaze". */
+  ability: string;
   defaultMoves: string[];
   evolutions?: EvolutionRule[];
 };
@@ -41,10 +43,12 @@ export type EvolutionRule = {
 
 export type Move = {
   id: string;
+  /** Localized display name. */
   name: string;
-  type: ElementType;
-  category: "physical" | "special" | "status";
+  /** Visual animation style; not modeled by @smogon/calc. */
   animation: "contact" | "projectile" | "status";
-  power: number;
+  /** Hit chance (%); @smogon/calc does not model accuracy, so it stays local. */
   accuracy: number;
+  /** Canonical (@smogon/calc) move name, e.g. "Flame Burst". Source of type/category/power. */
+  calcName: string;
 };
