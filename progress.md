@@ -114,6 +114,19 @@ the run state, so it must stay plain and serializable.
   rolls in `smogonCalc` and the local `instanceId` counter with the seeded
   `Rng` / server-assigned ids routed through the run state.
 
+### Run Loop & Progression
+
+The first full overworld → battle → overworld loop is closed (slices B–E above):
+
+- Walk onto a visible encounter marker → 1v1 battle starts.
+- Win → battle HP/status persists to the roster, the team earns XP, monsters
+  level up (capped at 12), and the encounter is retired: its marker is removed
+  and that tile no longer triggers a battle.
+- Lose (team wipe) → return to the map with the encounter still standing.
+- Everything that survives a return to the map lives in `RunState`, the
+  serializable snapshot the server will own. Next up (per plan): evolution
+  (reuses the `applyLevelUps` hook) and capture.
+
 ### Battle System
 
 - Lightweight turn-based battle engine.
@@ -189,6 +202,9 @@ the run state, so it must stay plain and serializable.
 - `src/main.ts`: Main Pixi app, scene switching, map and battle UI rendering.
 - `src/game/battle/BattleEngine.ts`: Battle rules and structured battle events.
 - `src/game/battle/types.ts`: Battle state, command, and event types.
+- `src/game/state/runState.ts`: Serializable `RunState` snapshot (seed, mapId, cleared encounters, player position + team).
+- `src/game/state/monster.ts`: Authoritative `MonsterState`, battle materialization, XP rewards, and level-ups.
+- `src/game/state/rng.ts`: Seeded deterministic `Rng` (for upcoming damage-roll / sync work).
 - `src/game/data/species.ts`: Species stats, moves, sprite slugs, and sprite anchor tuning.
 - `src/game/data/moves.ts`: Move data and animation categories.
 - `src/game/data/art.ts`: Pokemon sprite URL generation.
