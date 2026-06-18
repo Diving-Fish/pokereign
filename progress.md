@@ -12,6 +12,45 @@
 
 ## Implemented
 
+### Input Model (Mouse-first + hotkeys)
+
+The game is mouse/touch-first, with keyboard shortcuts as accelerators. The
+low-level clickable component is built on PixiJS **pointer** events, which the
+federated event system normalizes across mouse, touch, and pen — so the same UI
+works on desktop today and a future PC/mobile build with no input rewrite.
+
+- Reusable button component: `src/client/render/button.ts` (`createButton`).
+  Layered pixel-bevel frame with hover / press / disabled states, a tweakable
+  accent + face gradient, and a `content` layer callers fill with labels/icons.
+  Input is `pointertap` (fires once for both a mouse click and a touch tap),
+  plus `pointerover/out/down/up` for visual states.
+- Map exploration is click/tap-to-walk:
+  - Tapping a tile runs a bounded BFS (`src/game/map/pathfinding.ts`,
+    `findPath`, capped at `MAX_PATH_SEARCH_NODES = 6000`) and auto-walks the
+    shortest 4-dir path; far/unreachable taps are ignored so clicks never stall
+    on the 200x200 field.
+  - The viewport is the hit target (world-sized `hitArea`, `toWorld` undoes the
+    camera transform). Keyboard WASD/arrows still work and cancel the active
+    path for manual override.
+  - The active path is drawn as an overlay (`updateMapPathOverlay` in
+    `src/client/render/mapView.ts`): a trail line from the player through each
+    queued tile, gold waypoint dots, and a pulsing destination ring. It glides
+    with the player and clears on arrival / manual override.
+- Battle uses a clickable control bar (`src/client/render/battleControls.ts`,
+  `createBattleControls`) that replaces the old text menu:
+  - Top row: four move buttons (tiled), each tinted by its element type with a
+    type pill (localized) and a damage-category glyph (physical = diamond,
+    special = ring, status = square). Hotkeys `Q/W/E/R`.
+  - Bottom row (narrower): three party buttons (name, Lv, mini HP bar, 出战/倒下
+    tag) plus a Poké Ball **capture** button. Switch hotkeys `1/2/3`.
+  - Capture is a styled placeholder (capture isn't implemented yet); tapping it
+    shows a brief banner. Party buttons disable when the slot is active/fainted.
+  - The control bar shows during the player's turn; the message line takes over
+    during event playback (and the capture banner).
+  - New theme helpers back the look: `TYPE_COLORS`/`typeColor`,
+    `CATEGORY_COLORS`/`categoryColor`, `adjustColor`, and button palette keys in
+    `src/client/render/theme.ts`.
+
 ### Project Setup
 
 - Vite + TypeScript + PixiJS project scaffold.
@@ -150,11 +189,10 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 - Player status panel is bottom-right.
 - Status panels no longer show Pokemon portrait icons.
 - HP bars are styled closer to GBA panels.
-- Bottom battle dialog has two areas:
-  - Left: move list or Pokemon list.
-  - Right: `战斗 / 宝可梦` menu.
-- `Tab` toggles between battle menu and Pokemon menu.
-- `Enter` confirms selected move or switch.
+- Bottom battle dialog hosts the clickable control bar (see Input Model):
+  - Top row: four type-tinted move buttons (hotkeys `Q/W/E/R`).
+  - Bottom row: three party buttons + a capture button (switch `1/2/3`).
+- Clicking a move/party button (or its hotkey) confirms the action.
 - Structured battle events drive presentation.
 - Prototype animations:
   - Contact moves jump forward.
@@ -210,7 +248,10 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 - `src/game/data/art.ts`: Pokemon sprite URL generation.
 - `src/game/map/prototypeMap.ts`: Current map data.
 - `src/game/map/tiles.ts`: Tile definitions.
-- `src/client/render/mapView.ts`: Tilemap (`@pixi/tilemap`) + camera (`pixi-viewport`) map render view.
+- `src/client/render/mapView.ts`: Tilemap (`@pixi/tilemap`) + camera (`pixi-viewport`) map render view; forwards tile taps for click-to-walk.
+- `src/client/render/button.ts`: Reusable pointer-driven (mouse + touch) pixel button component.
+- `src/client/render/battleControls.ts`: Clickable battle control bar (move / party / capture buttons).
+- `src/game/map/pathfinding.ts`: Bounded BFS pathfinding for click-to-walk.
 - `src/client/render/battleLayout.ts`: Battle platform, panel, and sprite layout.
 - `src/client/render/battleBackground.ts`: Layered golden-hour battlefield.
 - `src/client/render/theme.ts`: Shared palette, pixel font stack, text-style factory.

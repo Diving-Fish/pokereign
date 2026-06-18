@@ -46,8 +46,70 @@ export const PALETTE = {
   hpMidLow: "#c79420",
   hpLow: "#ec5a48",
   hpLowLow: "#b32f2f",
-  hpTrack: "#13111c"
+  hpTrack: "#13111c",
+
+  // Interactive buttons (dark slate gem on the parchment command bar)
+  btnEdge: "#15131f",
+  btnBorder: "#0c0a14",
+  btnFaceTop: "#3c3858",
+  btnFaceBottom: "#2a2740",
+  btnInk: "#f6edcf",
+  btnInkSoft: "#c8bfa2",
+  btnDisabledInk: "#8a8270"
 } as const;
+
+/** Per-element accent colors for move buttons and type pills. */
+export const TYPE_COLORS: Record<string, string> = {
+  normal: "#b8b393",
+  fire: "#f1683b",
+  water: "#4f9fe8",
+  grass: "#5fb44e",
+  electric: "#f4cd44",
+  flying: "#9bb6e8",
+  rock: "#c1a460",
+  ground: "#dcb45a"
+};
+
+export function typeColor(type: string): string {
+  return TYPE_COLORS[type] ?? "#cccccc";
+}
+
+/** Damage-category accent colors (physical / special / status). */
+export const CATEGORY_COLORS: Record<string, string> = {
+  physical: "#e0683a",
+  special: "#3f7fd0",
+  status: "#7fae6a"
+};
+
+export function categoryColor(category: string): string {
+  return CATEGORY_COLORS[category] ?? "#999999";
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const value = hex.replace("#", "");
+  return {
+    r: parseInt(value.slice(0, 2), 16),
+    g: parseInt(value.slice(2, 4), 16),
+    b: parseInt(value.slice(4, 6), 16)
+  };
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const clamp = (c: number) => Math.max(0, Math.min(255, Math.round(c)));
+  return `#${[r, g, b].map((c) => clamp(c).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/**
+ * Shift a hex color toward white (amount > 0) or black (amount < 0). `amount`
+ * is in [-1, 1]; used for button hover/press shading and type-tinted faces.
+ */
+export function adjustColor(hex: string, amount: number): string {
+  const { r, g, b } = hexToRgb(hex);
+  const target = amount >= 0 ? 255 : 0;
+  const k = Math.abs(amount);
+  const mix = (c: number) => c + (target - c) * k;
+  return rgbToHex(mix(r), mix(g), mix(b));
+}
 
 export function hpColors(ratio: number): { hi: string; lo: string } {
   if (ratio > 0.5) return { hi: PALETTE.hpHigh, lo: PALETTE.hpHighLow };

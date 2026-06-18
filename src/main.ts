@@ -1,8 +1,9 @@
 import { Application, Assets, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
 import "./styles.css";
 import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBackgroundView } from "./client/render/battleBackground";
+import { createBattleControls, type BattleControlsView } from "./client/render/battleControls";
 import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayout";
-import { createMapRenderView, removeEncounterMarker, updateMapRenderView } from "./client/render/mapView";
+import { createMapRenderView, removeEncounterMarker, updateMapPathOverlay, updateMapRenderView } from "./client/render/mapView";
 import { fitCanvasToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
@@ -12,14 +13,14 @@ import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, Battle
 import { applyLevelUps, createMonsterState, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating } from "./game/state/monster";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
 import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
-import { MOVES, type MoveId } from "./game/data/moves";
+import type { MoveId } from "./game/data/moves";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
+import { findPath, type TileCoord } from "./game/map/pathfinding";
 import { TILE_DEFINITIONS } from "./game/map/tiles";
 import type { MapEncounterObject, TileId } from "./game/map/types";
 
 type SceneMode = "map" | "battle";
-type BattleMenuMode = "fight" | "pokemon";
 type BattleSpriteAnimation = {
   event: BattleMoveEvent;
   elapsed: number;
@@ -49,12 +50,6 @@ type MonsterPanelView = {
 type BattleDialogView = {
   container: Container;
   messageText: Text;
-  moveTexts: Text[];
-  moveMetaTexts: Text[];
-  pokemonTexts: Text[];
-  menuTexts: Record<BattleMenuMode, Text>;
-  optionCaret: Graphics;
-  menuCaret: Graphics;
 };
 type BattleRenderView = {
   container: Container;
@@ -71,6 +66,7 @@ type BattleRenderView = {
   playerPanel: MonsterPanelView;
   foePanel: MonsterPanelView;
   dialog: BattleDialogView;
+  controls: BattleControlsView;
 };
 
 const activeMap = PROTOTYPE_MAP;
@@ -101,16 +97,7 @@ const tileTextures: TileTextureMap = createTileTextures(app, activeMap.tileSize)
 // is given, so `setTextStyle`'s reference check actually short-circuits and we
 // avoid re-rasterizing labels every frame when their style is unchanged.
 const textStyles = {
-  move: new TextStyle(pixelText({ fill: PALETTE.boxInk, fontSize: 19, fontWeight: "400" })),
-  moveSelected: new TextStyle(pixelText({ fill: PALETTE.select, fontSize: 19, fontWeight: "700" })),
-  moveMeta: new TextStyle(pixelText({ fill: PALETTE.boxInkSoft, fontSize: 12 })),
-  pokemon: new TextStyle(pixelText({ fill: PALETTE.boxInk, fontSize: 17, fontWeight: "400" })),
-  pokemonSelected: new TextStyle(pixelText({ fill: PALETTE.select, fontSize: 17, fontWeight: "700" })),
-  pokemonFainted: new TextStyle(pixelText({ fill: "#a89a6e", fontSize: 17, fontWeight: "400" })),
-  message: new TextStyle(pixelText({ fill: PALETTE.boxInk, fontSize: 19, wordWrapWidth: 600 })),
-  menu: new TextStyle(pixelText({ fill: PALETTE.boxInk, fontSize: 20, fontWeight: "400" })),
-  menuSelected: new TextStyle(pixelText({ fill: PALETTE.select, fontSize: 20, fontWeight: "700" })),
-  hint: new TextStyle(pixelText({ fill: PALETTE.boxInkSoft, fontSize: 12 })),
+  message: new TextStyle(pixelText({ fill: PALETTE.boxInk, fontSize: 19, wordWrapWidth: 820 })),
   panelName: new TextStyle(pixelText({ fill: PALETTE.ink, fontSize: 20, fontWeight: "700", shadow: true })),
   panelLevel: new TextStyle(pixelText({ fill: PALETTE.gold, fontSize: 16, fontWeight: "700", shadow: true })),
   panelHpLabel: new TextStyle(pixelText({ fill: PALETTE.gold, fontSize: 13, fontWeight: "700" })),
@@ -132,7 +119,13 @@ const sceneLayer = new Container();
 app.stage.addChild(root);
 root.addChild(sceneLayer);
 
-const mapRender = createMapRenderView(activeMap, tileTextures, app.renderer.events, new Set(runState.clearedEncounterIds));
+const mapRender = createMapRenderView(
+  activeMap,
+  tileTextures,
+  app.renderer.events,
+  new Set(runState.clearedEncounterIds),
+  (tileX, tileY) => requestPathTo(tileX, tileY)
+);
 const battleRender = createBattleRenderView();
 battleRender.container.visible = false;
 sceneLayer.addChild(mapRender.container, battleRender.container);
@@ -142,6 +135,13 @@ sceneLayer.addChild(mapRender.container, battleRender.container);
 // player and camera glide instead of snapping.
 const STEP_DURATION_MS = 250;
 
+/** Keys that drive manual (keyboard) walking and cancel click-to-walk paths. */
+const MOVEMENT_KEYS = new Set(["arrowleft", "arrowright", "arrowup", "arrowdown", "w", "a", "s", "d"]);
+
+/** Battle hotkeys (lowercased): Q/W/E/R fire moves, 1/2/3 switch party slots. */
+const MOVE_HOTKEYS = ["q", "w", "e", "r"];
+const SWITCH_HOTKEYS = ["1", "2", "3"];
+
 const keys = new Set<string>();
 let mode: SceneMode = "map";
 let playerTile = { ...runState.player.position };
@@ -149,6 +149,9 @@ let stepFrom = { ...runState.player.position };
 const renderPos = { x: runState.player.position.x, y: runState.player.position.y };
 let stepElapsed = 0;
 let stepping = false;
+// Click/tap-to-walk: the queued tiles (each adjacent to the previous) the player
+// is auto-walking toward. A movement keypress clears it for manual override.
+let movePath: TileCoord[] = [];
 let battle: BattleEngine | null = null;
 let battleView: BattleStateView | null = null;
 // Which map encounter triggered the current battle, so a win can clear it.
@@ -158,15 +161,15 @@ let activeFoeLevel = 0;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
-let message = "方向键/WASD 移动，踩到标记进入 1v1 战斗。";
-let selectedMoveIndex = 0;
-let selectedPokemonIndex = 0;
-let battleMenuMode: BattleMenuMode = "fight";
+let message = "点击地图移动，踩到标记进入 1v1 战斗。";
 let playbackSteps: PlaybackStep[] = [];
 let currentPlaybackStep: PlaybackStep | null = null;
 let spriteAnimation: BattleSpriteAnimation | null = null;
 let hpTween: HpTween | null = null;
 let pendingOutcome: BattleOutcome = "ongoing";
+// While set in the future, a short non-playback banner (e.g. the capture
+// placeholder) is shown over the control buttons.
+let transientUntil = 0;
 const displayedHp = new Map<string, number>();
 
 let elapsed = 0;
@@ -175,7 +178,13 @@ let shakeUntil = 0;
 let shakeMag = 0;
 
 window.addEventListener("keydown", (event) => {
-  keys.add(event.key.toLowerCase());
+  const key = event.key.toLowerCase();
+  keys.add(key);
+
+  if (mode === "map" && MOVEMENT_KEYS.has(key)) {
+    // Manual walking overrides any active click-to-walk path.
+    movePath = [];
+  }
 
   if (mode === "battle") {
     handleBattleKey(event);
@@ -194,7 +203,10 @@ function isBlocked(x: number, y: number): boolean {
   return TILE_DEFINITIONS[tileAt(x, y)].blocksMovement;
 }
 
-/** One axis at a time (no diagonals); horizontal wins when both are held. */
+/**
+ * Desired step direction: keyboard input wins (and cancels any active path);
+ * otherwise follow the next tile of the click-to-walk path. One axis at a time.
+ */
 function readMoveDir(): { x: number; y: number } | null {
   if (keys.has("arrowleft") || keys.has("a")) {
     return { x: -1, y: 0 };
@@ -208,7 +220,25 @@ function readMoveDir(): { x: number; y: number } | null {
   if (keys.has("arrowdown") || keys.has("s")) {
     return { x: 0, y: 1 };
   }
+  if (movePath.length > 0) {
+    const target = movePath[0];
+    return { x: Math.sign(target.x - playerTile.x), y: Math.sign(target.y - playerTile.y) };
+  }
   return null;
+}
+
+/**
+ * Click/tap-to-walk: pathfind to the tapped tile and queue the walk. Bounded by
+ * the search-node cap, so far/unreachable targets are simply ignored.
+ */
+function requestPathTo(tileX: number, tileY: number): void {
+  if (mode !== "map") {
+    return;
+  }
+  const path = findPath(activeMap, playerTile, { x: tileX, y: tileY });
+  if (path && path.length > 0) {
+    movePath = path;
+  }
 }
 
 function updateMap(deltaMs: number): void {
@@ -224,6 +254,7 @@ function updateMap(deltaMs: number): void {
       }
       const next = { x: playerTile.x + dir.x, y: playerTile.y + dir.y };
       if (isBlocked(next.x, next.y)) {
+        movePath = [];
         return;
       }
       stepFrom = { ...playerTile };
@@ -248,6 +279,11 @@ function updateMap(deltaMs: number): void {
       runState.player.position.x = playerTile.x;
       runState.player.position.y = playerTile.y;
 
+      // Consume the path node we just reached.
+      if (movePath.length > 0 && movePath[0].x === playerTile.x && movePath[0].y === playerTile.y) {
+        movePath.shift();
+      }
+
       const encounter = activeMap.objects.find(
         (item) =>
           item.kind === "encounter" &&
@@ -256,6 +292,7 @@ function updateMap(deltaMs: number): void {
           !isEncounterCleared(runState, item.id)
       );
       if (encounter) {
+        movePath = [];
         startBattle(encounter);
         return;
       }
@@ -265,14 +302,12 @@ function updateMap(deltaMs: number): void {
 
 function startBattle(encounter: MapEncounterObject): void {
   mode = "battle";
-  selectedMoveIndex = 0;
-  selectedPokemonIndex = 0;
-  battleMenuMode = "fight";
   playbackSteps = [];
   currentPlaybackStep = null;
   spriteAnimation = null;
   hpTween = null;
   pendingOutcome = "ongoing";
+  transientUntil = 0;
   displayedHp.clear();
   battleIntroStart = elapsed;
   activeEncounterId = encounter.id;
@@ -284,7 +319,7 @@ function startBattle(encounter: MapEncounterObject): void {
     opponentRoster: [foe]
   });
   battleView = battle.view();
-  message = `${foe.name} 出现了！选择招式或按 Tab 换人。`;
+  message = `${foe.name} 出现了！点击招式或快捷键 Q/W/E/R。`;
 }
 
 function handleBattleKey(event: KeyboardEvent): void {
@@ -292,27 +327,53 @@ function handleBattleKey(event: KeyboardEvent): void {
     return;
   }
 
-  const key = event.key;
-  const optionCount = battleMenuMode === "fight" ? battleView.player.active.moves.length : battleView.player.roster.length;
+  const key = event.key.toLowerCase();
+  const moveIndex = MOVE_HOTKEYS.indexOf(key);
+  if (moveIndex >= 0) {
+    tryUseMove(moveIndex);
+    return;
+  }
+  const switchIndex = SWITCH_HOTKEYS.indexOf(key);
+  if (switchIndex >= 0) {
+    trySwitch(switchIndex);
+  }
+}
 
-  if (key === "ArrowUp" || key.toLowerCase() === "w") {
-    updateSelectedOption(Math.max(0, selectedOptionIndex() - 1), optionCount);
+/** Use the move in the given slot (0-3) if it exists. Shared by clicks + hotkeys. */
+function tryUseMove(index: number): void {
+  if (!battle || !battleView || isPlaybackActive()) {
+    return;
   }
-  if (key === "ArrowDown" || key.toLowerCase() === "s") {
-    updateSelectedOption(Math.min(optionCount - 1, selectedOptionIndex() + 1), optionCount);
+  const moveId = battleView.player.active.moves[index];
+  if (moveId === undefined) {
+    return;
   }
-  if (key === "Tab") {
-    battleMenuMode = battleMenuMode === "fight" ? "pokemon" : "fight";
-    message = battleMenuMode === "fight" ? "要使用哪一个招式？" : "要换上哪只宝可梦？";
-    event.preventDefault();
+  runBattleTurn({ type: "move", moveId });
+}
+
+/** Switch to the party member in the given slot if it is valid, alive, and benched. */
+function trySwitch(index: number): void {
+  if (!battle || !battleView || isPlaybackActive()) {
+    return;
   }
-  if (key === "Enter" || key === " ") {
-    if (battleMenuMode === "fight") {
-      runBattleTurn({ type: "move", moveId: battleView.player.active.moves[selectedMoveIndex] });
-    } else {
-      runBattleTurn({ type: "switch", targetIndex: selectedPokemonIndex });
-    }
+  const monster = battleView.player.roster[index];
+  if (!monster || index === battleView.player.activeIndex || monster.currentHp <= 0) {
+    return;
   }
+  runBattleTurn({ type: "switch", targetIndex: index });
+}
+
+/** Capture is not implemented yet; surface a short banner over the controls. */
+function tryCapture(): void {
+  if (!battle || !battleView || isPlaybackActive()) {
+    return;
+  }
+  showTransientMessage("捕捉功能尚未实装，敬请期待！");
+}
+
+function showTransientMessage(text: string): void {
+  message = text;
+  transientUntil = elapsed + 1.4;
 }
 
 function runBattleTurn(command: BattleCommand): void {
@@ -324,19 +385,6 @@ function runBattleTurn(command: BattleCommand): void {
   const result = battle.runTurn(command);
   battleView = battle.view();
   queueBattlePlayback(result.events, result.outcome);
-}
-
-function selectedOptionIndex(): number {
-  return battleMenuMode === "fight" ? selectedMoveIndex : selectedPokemonIndex;
-}
-
-function updateSelectedOption(index: number, optionCount: number): void {
-  const nextIndex = Math.max(0, Math.min(optionCount - 1, index));
-  if (battleMenuMode === "fight") {
-    selectedMoveIndex = nextIndex;
-  } else {
-    selectedPokemonIndex = nextIndex;
-  }
 }
 
 function isPlaybackActive(): boolean {
@@ -536,7 +584,7 @@ function finishBattlePlaybackIfNeeded(): void {
     battleView = null;
     battleTeam = null;
     displayedHp.clear();
-    message = "方向键/WASD 移动，踩到标记进入 1v1 战斗。";
+    message = "点击地图移动，踩到标记进入 1v1 战斗。";
     pendingOutcome = "ongoing";
   }
 }
@@ -564,7 +612,22 @@ function createBattleRenderView(): BattleRenderView {
   const foePanel = createMonsterPanelView();
   const playerPanel = createMonsterPanelView();
   const dialog = createBattleDialogView();
-  container.addChild(foeShadow, playerShadow, foeSprite, playerSprite, moveLayer, foePanel.container, playerPanel.container, dialog.container);
+  const controls = createBattleControls({
+    onMove: (index) => tryUseMove(index),
+    onSwitch: (index) => trySwitch(index),
+    onCapture: () => tryCapture()
+  });
+  container.addChild(
+    foeShadow,
+    playerShadow,
+    foeSprite,
+    playerSprite,
+    moveLayer,
+    foePanel.container,
+    playerPanel.container,
+    dialog.container,
+    controls.container
+  );
 
   return {
     container,
@@ -580,7 +643,8 @@ function createBattleRenderView(): BattleRenderView {
     statusPulse,
     playerPanel,
     foePanel,
-    dialog
+    dialog,
+    controls
   };
 }
 
@@ -653,43 +717,14 @@ function createBattleDialogView(): BattleDialogView {
   const container = new Container();
   drawStaticFramedBox(container, 32, 414, GAME_WIDTH - 64, 110);
 
-  const divider = new Graphics();
-  divider.moveTo(688, 424).lineTo(688, 514).stroke({ color: PALETTE.boxEdge, width: 2, alpha: 0.6 });
-  divider.moveTo(690, 424).lineTo(690, 514).stroke({ color: PALETTE.gold, width: 1, alpha: 0.7 });
-  container.addChild(divider);
-
+  // Shown during playback (move/HP/result text). During the player's turn the
+  // clickable control bar (createBattleControls) replaces it instead.
   const messageText = new Text({ text: "", style: textStyles.message });
   messageText.x = 64;
-  messageText.y = 448;
+  messageText.y = 456;
   container.addChild(messageText);
 
-  const moveTexts = Array.from({ length: 4 }, () => new Text({ text: "", style: textStyles.move }));
-  const moveMetaTexts = Array.from({ length: 4 }, () => new Text({ text: "", style: textStyles.moveMeta }));
-  for (let index = 0; index < moveTexts.length; index += 1) {
-    container.addChild(moveTexts[index], moveMetaTexts[index]);
-  }
-
-  const pokemonTexts = Array.from({ length: playerRoster.length }, () => new Text({ text: "", style: textStyles.pokemon }));
-  for (const text of pokemonTexts) {
-    container.addChild(text);
-  }
-
-  const menuTexts = {
-    fight: new Text({ text: "战斗", style: textStyles.menu }),
-    pokemon: new Text({ text: "宝可梦", style: textStyles.menu })
-  };
-  container.addChild(menuTexts.fight, menuTexts.pokemon);
-
-  const hintText = new Text({ text: "Tab 切换 / Enter 确定", style: textStyles.hint });
-  hintText.x = 704;
-  hintText.y = 494;
-  container.addChild(hintText);
-
-  const optionCaret = new Graphics();
-  const menuCaret = new Graphics();
-  container.addChild(optionCaret, menuCaret);
-
-  return { container, messageText, moveTexts, moveMetaTexts, pokemonTexts, menuTexts, optionCaret, menuCaret };
+  return { container, messageText };
 }
 
 function drawStaticFramedBox(layer: Container, x: number, y: number, width: number, height: number): void {
@@ -808,103 +843,15 @@ function updateBattleDialog(): void {
     return;
   }
 
-  const dialog = battleRender.dialog;
-  const playbackActive = isPlaybackActive();
-  setText(dialog.messageText, message);
-  dialog.messageText.visible = playbackActive;
-  dialog.optionCaret.clear();
-  updateMoveOptions(dialog, battleMenuMode === "fight" && !playbackActive);
-  updatePokemonOptions(dialog, battleMenuMode === "pokemon" && !playbackActive);
-  updateBattleMenu(dialog);
-}
-
-function updateMoveOptions(dialog: BattleDialogView, visible: boolean): void {
-  if (!battleView) {
-    return;
+  // Show the message line during playback (and the brief capture banner);
+  // otherwise show the clickable control bar for the player's turn.
+  const showMessage = isPlaybackActive() || elapsed < transientUntil;
+  setText(battleRender.dialog.messageText, message);
+  battleRender.dialog.messageText.visible = showMessage;
+  battleRender.controls.container.visible = !showMessage;
+  if (!showMessage) {
+    battleRender.controls.update(battleView, getDisplayedHp);
   }
-
-  for (let index = 0; index < dialog.moveTexts.length; index += 1) {
-    const text = dialog.moveTexts[index];
-    const meta = dialog.moveMetaTexts[index];
-    const moveId = battleView.player.active.moves[index];
-    const rowX = 64 + (index % 2) * 308;
-    const rowY = 438 + Math.floor(index / 2) * 36;
-    text.visible = visible && moveId !== undefined;
-    meta.visible = visible && moveId !== undefined;
-    if (!moveId) {
-      continue;
-    }
-
-    const move = MOVES[moveId];
-    const selected = index === selectedMoveIndex;
-    text.x = rowX;
-    text.y = rowY;
-    meta.x = rowX + 150;
-    meta.y = rowY + 5;
-    const info = moveMeta(moveId);
-    setText(text, move.name);
-    setTextStyle(text, selected ? textStyles.moveSelected : textStyles.move);
-    setText(meta, `${localizeElementType(info.type)} / ${localizeMoveCategory(info.category)}`);
-    if (visible && selected) {
-      drawCaret(dialog.optionCaret, rowX - 18, rowY + 6);
-    }
-  }
-}
-
-function updatePokemonOptions(dialog: BattleDialogView, visible: boolean): void {
-  if (!battleView) {
-    return;
-  }
-
-  for (let index = 0; index < dialog.pokemonTexts.length; index += 1) {
-    const text = dialog.pokemonTexts[index];
-    const monster = battleView.player.roster[index];
-    text.visible = visible && monster !== undefined;
-    if (!monster) {
-      continue;
-    }
-
-    const selected = index === selectedPokemonIndex;
-    const isActive = index === battleView.player.activeIndex;
-    const fainted = monster.currentHp <= 0;
-    const hp = getDisplayedHp(monster.instanceId, monster.currentHp);
-    const rowY = 430 + index * 28;
-    const tag = isActive ? "  出战" : fainted ? "  倒下" : "";
-    text.x = 64;
-    text.y = rowY;
-    setText(text, `${monster.name}  Lv.${monster.level}  ${hp}/${monster.maxHp}${tag}`);
-    setTextStyle(text, fainted ? textStyles.pokemonFainted : selected ? textStyles.pokemonSelected : textStyles.pokemon);
-    if (visible && selected) {
-      drawCaret(dialog.optionCaret, 46, rowY + 6);
-    }
-  }
-}
-
-function updateBattleMenu(dialog: BattleDialogView): void {
-  const options: Array<[BattleMenuMode, string]> = [
-    ["fight", "战斗"],
-    ["pokemon", "宝可梦"]
-  ];
-
-  dialog.menuCaret.clear();
-  options.forEach(([menuMode, label], index) => {
-    const selected = battleMenuMode === menuMode;
-    const rowY = 438 + index * 34;
-    const text = dialog.menuTexts[menuMode];
-    text.x = 724;
-    text.y = rowY;
-    setText(text, label);
-    setTextStyle(text, selected ? textStyles.menuSelected : textStyles.menu);
-    if (selected) {
-      drawCaret(dialog.menuCaret, 704, rowY + 7);
-    }
-  });
-}
-
-function drawCaret(caret: Graphics, x: number, y: number): void {
-  const bob = Math.sin(elapsed * 7) * 2.5 + 2.5;
-  caret.moveTo(x + bob, y).lineTo(x + bob + 9, y + 5).lineTo(x + bob, y + 10).fill(PALETTE.select);
-  caret.stroke({ color: PALETTE.selectGlow, width: 1, alpha: 0.8 });
 }
 
 function updateMoveAnimation(): void {
@@ -968,6 +915,7 @@ app.ticker.add((ticker) => {
     sceneLayer.position.set(0, 0);
     updateMap(ticker.deltaMS);
     updateMapRenderView(mapRender, activeMap, renderPos);
+    updateMapPathOverlay(mapRender, activeMap, renderPos, movePath, elapsed);
   } else {
     mapRender.container.visible = false;
     battleRender.container.visible = true;
@@ -1048,38 +996,9 @@ function getMoveColor(moveId: MoveId): string {
   return "#d8d8d8";
 }
 
-function localizeElementType(type: string): string {
-  const names: Record<string, string> = {
-    normal: "一般",
-    fire: "火",
-    water: "水",
-    grass: "草",
-    electric: "电",
-    flying: "飞行",
-    rock: "岩石",
-    ground: "地面"
-  };
-  return names[type] ?? type;
-}
-
-function localizeMoveCategory(category: string): string {
-  const names: Record<string, string> = {
-    physical: "物理",
-    special: "特殊",
-    status: "变化"
-  };
-  return names[category] ?? category;
-}
-
 function setText(text: Text, value: string): void {
   if (text.text !== value) {
     text.text = value;
-  }
-}
-
-function setTextStyle(text: Text, style: TextStyle): void {
-  if (text.style !== style) {
-    text.style = style;
   }
 }
 
