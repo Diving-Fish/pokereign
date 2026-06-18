@@ -51,4 +51,6 @@ export type Move = {
   accuracy: number;
   /** Canonical (@smogon/calc) move name, e.g. "Flame Burst". Source of type/category/power. */
   calcName: string;
+  /** Maximum PP (move uses). Consumption isn't tracked yet, so the UI shows it as full. */
+  pp: number;
 };

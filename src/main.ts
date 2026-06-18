@@ -4,7 +4,8 @@ import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBack
 import { createBattleControls, type BattleControlsView } from "./client/render/battleControls";
 import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayout";
 import { createMapRenderView, removeEncounterMarker, updateMapPathOverlay, updateMapRenderView } from "./client/render/mapView";
-import { fitCanvasToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
+import { fitRendererToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
+import { createTeamHud, type TeamHudView } from "./client/render/teamHud";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
@@ -12,7 +13,10 @@ import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
 import { applyLevelUps, createMonsterState, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating } from "./game/state/monster";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
-import { getAllBattleSpriteUrls, getBattleSpriteUrl } from "./game/data/art";
+import { getAllAnimatedBattleSpriteUrls, getAllBattleSpriteUrls, getAnimatedBattleSpriteUrl, getBattleSpriteUrl } from "./game/data/art";
+import { createAnimatedBattler, type AnimatedBattler } from "./client/render/animatedBattler";
+import { loadGif } from "./client/render/gifLoader";
+import "pixi.js/gif";
 import type { MoveId } from "./game/data/moves";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
@@ -58,6 +62,8 @@ type BattleRenderView = {
   foeShadow: Graphics;
   playerSprite: Sprite;
   foeSprite: Sprite;
+  playerBattler: AnimatedBattler;
+  foeBattler: AnimatedBattler;
   projectileTrail: Graphics;
   projectileOrb: Graphics;
   projectileBurst: Graphics;
@@ -76,7 +82,10 @@ await app.init({
   background: "#14121e",
   width: GAME_WIDTH,
   height: GAME_HEIGHT,
-  antialias: false
+  // Smooths vector geometry edges (battle-background hills, framed boxes, HP
+  // bars). Textured pixel-art sprites/tiles are unaffected — MSAA only touches
+  // primitive edges, and their interiors keep `nearest` sampling.
+  antialias: true
 });
 
 const host = document.querySelector<HTMLDivElement>("#app");
@@ -84,12 +93,35 @@ if (!host) {
   throw new Error("Missing #app host element.");
 }
 host.appendChild(app.canvas);
-fitCanvasToWindow(app.canvas);
-window.addEventListener("resize", () => fitCanvasToWindow(app.canvas));
+fitRendererToWindow(app);
+window.addEventListener("resize", () => fitRendererToWindow(app));
 
+// Dev-only GM hook: jump straight into a preset battle from the browser console
+// — `gmStartBattle()` or `gmStartBattle("charmander", 8)` — for quick manual and
+// automated testing. `import.meta.env.DEV` is false in production, so this whole
+// block is stripped from the build.
+if (import.meta.env.DEV) {
+  (window as typeof window & { gmStartBattle?: (speciesId?: SpeciesId, level?: number) => void }).gmStartBattle = (
+    speciesId: SpeciesId = "squirtle",
+    level = 5
+  ): void => {
+    if (!SPECIES[speciesId]) {
+      console.warn(`gmStartBattle: unknown species "${speciesId}". Known: ${Object.keys(SPECIES).join(", ")}`);
+      return;
+    }
+    startBattle({ kind: "encounter", id: "gm-preset", x: -1, y: -1, speciesId, level });
+  };
+}
+
+// Preload the animated GIFs (via our flicker-fixed decoder) and the static PNGs
+// (error fallback) up front, so that by the time a battle starts the GifSource
+// is cached and attaches synchronously — no Gen5 still ever flashes in.
 void Assets.load(getAllBattleSpriteUrls()).catch((error: unknown) => {
-  console.warn("Failed to preload battle sprites.", error);
+  console.warn("Failed to preload static battle sprites.", error);
 });
+for (const url of getAllAnimatedBattleSpriteUrls()) {
+  void loadGif(url).catch((error: unknown) => console.warn(`Failed to preload ${url}`, error));
+}
 void document.fonts?.load('16px "Zpix"').catch(() => undefined);
 
 const tileTextures: TileTextureMap = createTileTextures(app, activeMap.tileSize);
@@ -129,6 +161,13 @@ const mapRender = createMapRenderView(
 const battleRender = createBattleRenderView();
 battleRender.container.visible = false;
 sceneLayer.addChild(mapRender.container, battleRender.container);
+
+// UI overlay layer sits above the (shakeable) scene layer so HUD chrome and the
+// monster detail modal are unaffected by battle screen shake and always on top.
+const uiLayer = new Container();
+root.addChild(uiLayer);
+const teamHud: TeamHudView = createTeamHud(runState.player.team);
+uiLayer.addChild(teamHud.bar, teamHud.overlay);
 
 // 4 tiles/sec → 250 ms per tile. Movement is grid-locked: one tile per step,
 // no diagonals, with the on-screen position interpolated across the step so the
@@ -180,6 +219,11 @@ let shakeMag = 0;
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
   keys.add(key);
+
+  if (key === "escape" && teamHud.isDetailOpen()) {
+    teamHud.closeDetail();
+    return;
+  }
 
   if (mode === "map" && MOVEMENT_KEYS.has(key)) {
     // Manual walking overrides any active click-to-walk path.
@@ -586,6 +630,8 @@ function finishBattlePlaybackIfNeeded(): void {
     displayedHp.clear();
     message = "点击地图移动，踩到标记进入 1v1 战斗。";
     pendingOutcome = "ongoing";
+    // The roster's HP/level may have changed; repaint the team HUD slots.
+    teamHud.refresh();
   }
 }
 
@@ -629,6 +675,9 @@ function createBattleRenderView(): BattleRenderView {
     controls.container
   );
 
+  const playerBattler = createAnimatedBattler(container, playerSprite);
+  const foeBattler = createAnimatedBattler(container, foeSprite);
+
   return {
     container,
     background,
@@ -636,6 +685,8 @@ function createBattleRenderView(): BattleRenderView {
     foeShadow,
     playerSprite,
     foeSprite,
+    playerBattler,
+    foeBattler,
     projectileTrail,
     projectileOrb,
     projectileBurst,
@@ -754,8 +805,8 @@ function updateBattleRender(): void {
   const foe = battleView.opponent.active;
   const playerSprite = getSpriteRenderTuning(player.speciesId, "back", "player");
   const foeSprite = getSpriteRenderTuning(foe.speciesId, "front", "foe");
-  updateBattleSprite(battleRender.playerShadow, battleRender.playerSprite, player.speciesId, "back", "player", playerSprite.x, playerSprite.y, playerSprite.scale);
-  updateBattleSprite(battleRender.foeShadow, battleRender.foeSprite, foe.speciesId, "front", "foe", foeSprite.x, foeSprite.y, foeSprite.scale);
+  updateBattleSprite(battleRender.playerShadow, battleRender.playerBattler, battleRender.playerSprite, player.speciesId, "back", "player", playerSprite.x, playerSprite.y, playerSprite.scale);
+  updateBattleSprite(battleRender.foeShadow, battleRender.foeBattler, battleRender.foeSprite, foe.speciesId, "front", "foe", foeSprite.x, foeSprite.y, foeSprite.scale);
   updateMoveAnimation();
 
   updateMonsterPanel(
@@ -781,15 +832,27 @@ function updateBattleRender(): void {
   updateBattleDialog();
 }
 
+// --- Animated (ani) sprite tuning -------------------------------------------
+// ani GIFs are variable-size and drawn near-native, so relative body size is
+// already baked in: a single global scale per facing reads correctly where the
+// fixed 96×96 stills needed per-species scaling.
+//
+// ani sprites are grounded on the platform CENTER (so the shadow lands on the
+// disc and the feet rest on it), independent of the per-species gen5 foot line.
+// ANI_FOOT_NUDGE is a fine-tune offset from that center (negative = up).
+const ANI_SPRITE_SCALE = { front: 1.7, back: 2.0 } as const;
+const ANI_FOOT_NUDGE = { front: 0, back: 0 } as const;
+
 function updateBattleSprite(
   shadow: Graphics,
-  sprite: Sprite,
+  battler: AnimatedBattler,
+  fallback: Sprite,
   speciesId: SpeciesId,
   facing: "front" | "back",
   side: BattleSide,
   x: number,
   y: number,
-  scale: number
+  staticScale: number
 ): void {
   const offset = getSpriteAnimationOffset(side);
   const intro = easeOutCubic(clamp01((elapsed - battleIntroStart) / 0.5));
@@ -797,15 +860,31 @@ function updateBattleSprite(
   const phase = side === "player" ? 0 : Math.PI;
   const bob = Math.sin(elapsed * 2.2 + phase) * 2.2;
 
-  shadow.clear();
-  const shadowW = 64 * (scale / 2.7);
-  shadow.ellipse(x + offset.x + introSlide, y + 6, shadowW, shadowW * 0.32).fill({ color: "#243018", alpha: 0.32 * intro });
+  // Keep the static PNG current (it is the pre-load placeholder and the fallback
+  // if the GIF errors), then request the animated version — a no-op once it is
+  // already on screen. Texture order before request() avoids a stale frame on
+  // a species switch.
+  fallback.texture = Texture.from(getBattleSpriteUrl(speciesId, facing));
+  battler.request(getAnimatedBattleSpriteUrl(speciesId, facing));
 
-  sprite.texture = Texture.from(getBattleSpriteUrl(speciesId, facing));
-  sprite.scale.set(scale);
-  sprite.x = x + offset.x + introSlide;
-  sprite.y = y + offset.y + bob;
-  sprite.alpha = intro;
+  const node = battler.active();
+  const isAnimated = node !== fallback;
+  const scale = isAnimated ? ANI_SPRITE_SCALE[facing] : staticScale;
+
+  // ani: ground on the platform centre. Static fallback: keep the gen5 foot line `y`.
+  const layoutSide = side === "player" ? "player" : "foe";
+  const groundY = isAnimated ? BATTLE_LAYOUT[layoutSide].platform.y + ANI_FOOT_NUDGE[facing] : y + 6;
+
+  node.scale.set(scale);
+  node.x = x + offset.x + introSlide;
+  node.y = (isAnimated ? groundY : y) + offset.y + bob;
+  node.alpha = intro;
+
+  shadow.clear();
+  const shadowRx = battler.naturalSize().width * scale * 0.25;
+  // Shadow sits at the ground line (platform centre for ani) under the feet; it
+  // intentionally ignores `bob` so it stays planted while the sprite bounces.
+  shadow.ellipse(x + offset.x + introSlide, groundY, shadowRx, shadowRx * 0.32).fill({ color: "#243018", alpha: 0.32 * intro });
 }
 
 function updateMonsterPanel(view: MonsterPanelView, x: number, y: number, name: string, level: number, hp: number, maxHp: number, mirror: boolean): void {
@@ -908,6 +987,8 @@ function updateMoveAnimation(): void {
 
 app.ticker.add((ticker) => {
   elapsed += ticker.deltaMS / 1000;
+
+  teamHud.setVisible(mode === "map");
 
   if (mode === "map") {
     mapRender.container.visible = true;

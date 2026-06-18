@@ -35,6 +35,8 @@ export type MonsterState = {
   status: BattleStatus | null;
   currentHp: number;
   moves: MoveId[];
+  /** Localized name of the held item, if any. The item system isn't built yet. */
+  heldItem?: string;
 };
 
 // Local id counter. To be replaced by server-assigned ids once the run state is

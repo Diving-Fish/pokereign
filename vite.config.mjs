@@ -22,7 +22,7 @@ function showdownSpriteProxy() {
 
 function proxySpriteRequest(path, response) {
   const normalizedPath = path.replace(/^\/+/, "");
-  if (!/^[a-z0-9/_-]+\.png$/i.test(normalizedPath)) {
+  if (!/^[a-z0-9/_-]+\.(png|gif)$/i.test(normalizedPath)) {
     response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
     response.end("Invalid sprite path.");
     return;
@@ -38,7 +38,9 @@ function proxySpriteRequest(path, response) {
     },
     (upstreamResponse) => {
       response.writeHead(upstreamResponse.statusCode ?? 502, {
-        "content-type": upstreamResponse.headers["content-type"] ?? "image/png",
+        "content-type":
+          upstreamResponse.headers["content-type"] ??
+          (normalizedPath.endsWith(".gif") ? "image/gif" : "image/png"),
         "cache-control": "public, max-age=3600"
       });
       upstreamResponse.pipe(response);

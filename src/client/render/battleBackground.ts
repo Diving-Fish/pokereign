@@ -147,9 +147,9 @@ function drawPlatform(
   rim.ellipse(x, y - 1, rx - 2, ry - 1).stroke({ color: rimColor, width: 3, alpha: 0.9 });
   layer.addChild(rim);
 
-  // Soft top highlight.
+  // Soft top highlight, centered on the disc.
   const highlight = new Graphics();
-  highlight.ellipse(x - width * 0.1, y - height * 0.16, rx * 0.34, ry * 0.34).fill({ color: "#f2f6d2", alpha: 0.32 });
+  highlight.ellipse(x, y - height * 0.16, rx * 0.34, ry * 0.34).fill({ color: "#f2f6d2", alpha: 0.32 });
   layer.addChild(highlight);
 }
 

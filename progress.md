@@ -54,17 +54,48 @@ works on desktop today and a future PC/mobile build with no input rewrite.
 ### Project Setup
 
 - Vite + TypeScript + PixiJS project scaffold.
-- Fixed logical game resolution: `960x540`.
-- Canvas scales to fit browser window while preserving game coordinates.
+- Fixed logical game resolution: `960x540` (all layout math stays in these units).
+- Crisp scaling (`fitRendererToWindow` in `src/client/render/screen.ts`): instead
+  of rendering at 960×540 and CSS-upscaling (blurry), the renderer backbuffer
+  resolution is matched to the on-screen pixel density (`renderer.resolution =
+  scale * devicePixelRatio`). Vector graphics + text rasterize crisp at native
+  pixels; the logical coordinate space stays 960×540 so no layout code changes.
+  Pixel-art tiles keep `nearest`; canvas `image-rendering` is `auto` and
+  `antialias` is on so battle sprites stay smoothly interpolated.
 - `npm run dev`, `npm run build`, and `npm run preview` scripts.
 
 ### Sprite Assets
 
-- Battle Pokemon sprites load through a local Vite proxy:
-  - Front sprites: `/pokemon-sprites/gen5/{slug}.png`
-  - Back sprites: `/pokemon-sprites/gen5-back/{slug}.png`
-- Proxy forwards to Pokemon Showdown to avoid browser CORS/WebGL texture issues.
-- Species data contains `spriteSlug` and per-facing `spriteAnchors` for alignment.
+- Battle Pokémon sprites load through a local Vite proxy (`vite.config.mjs`) that
+  forwards to Pokémon Showdown to avoid browser CORS/WebGL texture issues. The
+  proxy serves both `.png` and `.gif`. NOTE: the proxy is dev/preview only — a
+  production build needs its own proxy or vendored assets.
+- Two sprite tiers (`src/game/data/art.ts`):
+  - Animated **gen6 (X/Y) "ani"** GIFs are the primary battlers:
+    `/pokemon-sprites/ani/{slug}.gif` (front) + `/pokemon-sprites/ani-back/{slug}.gif`
+    (back). Variable-size, near-native resolution (relative body size baked in).
+  - Static **gen5** PNGs (`/pokemon-sprites/gen5{,-back}/{slug}.png`, fixed 96×96)
+    are the error/preload fallback and still power the team HUD.
+- Animated sprites (`src/client/render/animatedBattler.ts`): one `GifSprite`
+  (`pixi.js/gif`) per battler, lazy-loaded and swapped in over the static PNG
+  fallback. The fallback stays hidden and is only revealed if a GIF genuinely
+  fails — and all GIFs are preloaded at startup, so a cached `GifSource` attaches
+  synchronously and the low-res still never flashes in at battle start.
+- **GIF flicker fix** (`src/client/render/gifLoader.ts`): `pixi.js/gif`'s built-in
+  decoder clears the WHOLE canvas on disposal method 2, but Showdown's ani frames
+  are "first frame full + later frames sub-rect patches + interspersed disposal-1
+  frames", so a full-canvas clear drops the persistent pixels and the sprite
+  flickers (worst on ani-back). We decode with `gifuct-js` ourselves and restore
+  only the FRAME's rect — matching native `<img>` decoding, which is why Showdown
+  itself doesn't flicker. Verified by simulation: per-frame opaque-pixel variance
+  dropped from ~115873 (frames as low as 130px) to ~5 (stable ~1780px). We keep
+  our own cache (bypassing `Assets`) so the corrected path is the only one.
+- ani sprites are scaled by a single global factor per facing (`ANI_SPRITE_SCALE`
+  in `main.ts`; relative body size is already in the GIF dims) and grounded on the
+  platform CENTRE — shadow on the disc, feet resting on it — independent of the
+  per-species gen5 foot line. `ANI_FOOT_NUDGE` is the fine-tune offset.
+- Species data contains `spriteSlug` and per-facing `spriteAnchors` (the latter
+  now only tunes the static gen5 fallback's scale / foot line).
 
 ### Map Prototype
 
@@ -204,6 +235,25 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
   - Show effectiveness text when relevant.
   - Tween HP bar.
 
+### Team HUD (party info bar)
+
+- `src/client/render/teamHud.ts` (`createTeamHud`) renders a bottom-right party
+  bar plus a centered detail overlay. Shown only in map mode (`setVisible`),
+  refreshed on roster change (`refresh`); the detail window opens on a party
+  square and closes on Esc / outside click (`isDetailOpen`, `closeDetail`).
+- The bar shows each team member's sprite square plus an items button; the detail
+  window shows stats and the monster's moves with PP and held item.
+- Supporting data, display-only for now: `Move.pp` (`types.ts` / `moves.ts`) and
+  `MonsterState.heldItem` (`monster.ts`). PP isn't consumed and the item system
+  isn't built yet, so the UI just shows them as full / present.
+
+### Dev Tooling
+
+- Dev-only GM hook in `main.ts`: `window.gmStartBattle(speciesId?, level?)` jumps
+  straight into a preset battle from the browser console (default 杰尼龟 Lv.5),
+  for quick manual + automated testing without walking the map to an encounter.
+  Wrapped in `import.meta.env.DEV`, so it is stripped from production builds.
+
 ### Visual Pass — "Golden-hour Handheld" Aesthetic
 
 - Unified art direction defined in `src/client/render/theme.ts`:
@@ -245,7 +295,11 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 - `src/game/state/rng.ts`: Seeded deterministic `Rng` (for upcoming damage-roll / sync work).
 - `src/game/data/species.ts`: Species stats, moves, sprite slugs, and sprite anchor tuning.
 - `src/game/data/moves.ts`: Move data and animation categories.
-- `src/game/data/art.ts`: Pokemon sprite URL generation.
+- `src/game/data/art.ts`: gen5 (PNG) + ani (GIF) Pokémon sprite URL generation.
+- `src/client/render/screen.ts`: logical `960x540` constants + hi-DPI renderer fitting.
+- `src/client/render/animatedBattler.ts`: per-battler `GifSprite` manager (lazy load, static-PNG fallback, sync cache attach).
+- `src/client/render/gifLoader.ts`: flicker-fixed GIF→`GifSource` decoder (`gifuct-js`, per-frame-rect disposal) + cache.
+- `src/client/render/teamHud.ts`: bottom-right party info bar + centered detail overlay (map mode).
 - `src/game/map/prototypeMap.ts`: Current map data.
 - `src/game/map/tiles.ts`: Tile definitions.
 - `src/client/render/mapView.ts`: Tilemap (`@pixi/tilemap`) + camera (`pixi-viewport`) map render view; forwards tile taps for click-to-walk.
@@ -268,8 +322,14 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 
 ## Known Notes
 
-- Pokemon sprite alignment differs by species and facing because Showdown sprites include transparent padding.
-- Use `spriteAnchors.front/back.footOffset` in `species.ts` to tune individual Pokemon placement.
+- Animated (ani) battlers are grounded on the platform centre (uniform), so they
+  no longer need per-species foot tuning. `spriteAnchors.front/back.footOffset`
+  in `species.ts` now only affects the static gen5 fallback, whose alignment
+  still varies by species/facing due to transparent padding.
+- The `pokemon-showdown-client/` folder (cloned for reference) is git-ignored and
+  not part of this repo. The ani sprite dimension table (`BattlePokemonSprites`
+  in `data/pokedex-mini.js`) only carries `{w, h}` for ani — no vertical offset —
+  so it isn't needed; we read frame size from `GifSource` at runtime instead.
 - The current map tile art is generated placeholder art, not final tileset art.
 - Map schema is intentionally close to what a future Tiled JSON import can produce.
 
