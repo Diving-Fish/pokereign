@@ -273,6 +273,20 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
   square and closes on Esc / outside click (`isDetailOpen`, `closeDetail`).
 - The bar shows each team member's sprite square plus an items button; the detail
   window shows stats and the monster's moves with PP and held item.
+- **Drag to reorder the party** (decides lead/battle order): press-and-drag a
+  party square sideways to reposition it; the other squares slide to open a gap,
+  and on drop the shared roster array (`runState.player.team`) is spliced in
+  place so the new lead order persists into the next battle (`startBattle` maps
+  the roster in order, slot 0 leads). A press that moves less than a small
+  threshold is still a tap that opens the detail window. Implemented with PixiJS
+  `pointerdown` + `globalpointermove` on the bar; only shown in map mode, so
+  order is set on the overworld before entering a battle.
+- **Drag to reorder a monster's moves** (inside the detail window): each move
+  cell is now a self-contained Container; press-and-drag one sideways to
+  reposition it among that monster's moves. On drop the `monster.moves` array is
+  spliced in place (it is part of the persistent `MonsterState`), so the new
+  order carries into battle as the Q/W/E/R layout. Same drag pattern as the
+  party bar, scoped to the detail content; empty move slots aren't draggable.
 - Supporting data, display-only for now: `Move.pp` (`types.ts` / `moves.ts`) and
   `MonsterState.heldItem` (`monster.ts`). PP isn't consumed and the item system
   isn't built yet, so the UI just shows them as full / present.

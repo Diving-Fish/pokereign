@@ -1,4 +1,4 @@
-import { Assets, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
+import { Assets, Container, FederatedPointerEvent, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
 import { GAME_HEIGHT, GAME_WIDTH } from "./screen";
 import { adjustColor, hpColors, PALETTE, pixelText, typeColor } from "./theme";
 import { getBattleSpriteUrl } from "../../game/data/art";
@@ -18,6 +18,31 @@ const ITEM = 40;
 const GAP = 8;
 const PAD = 10;
 const MARGIN = 14;
+
+// Pointer must travel this far before a press on a slot becomes a drag (so a
+// plain tap still opens the detail window).
+const DRAG_THRESHOLD = 6;
+
+function clamp(value: number, lo: number, hi: number): number {
+  return value < lo ? lo : value > hi ? hi : value;
+}
+
+/** Home x of slot at display position `pos` within the bar. */
+function slotHomeX(pos: number): number {
+  return PAD + pos * (SQUARE + GAP);
+}
+
+// Move grid geometry (the 4 move cells along the bottom of the detail window).
+const MOVE_CELL_W = 156;
+const MOVE_CELL_H = 64;
+const MOVE_CELL_GAP = 8;
+const MOVE_CELL_X0 = 28;
+const MOVE_CELL_Y = 414;
+
+/** Home x of the move cell at display position `pos` within the detail content. */
+function moveCellHomeX(pos: number): number {
+  return MOVE_CELL_X0 + pos * (MOVE_CELL_W + MOVE_CELL_GAP);
+}
 const BAR_W = PAD * 2 + 3 * SQUARE + 2 * GAP + GAP + ITEM;
 const BAR_H = PAD * 2 + SQUARE;
 
@@ -137,23 +162,131 @@ export type TeamHudView = {
   isDetailOpen(): boolean;
 };
 
-export function createTeamHud(roster: MonsterState[]): TeamHudView {
+export function createTeamHud(roster: MonsterState[], onReorder?: () => void): TeamHudView {
   const bar = new Container();
   bar.x = GAME_WIDTH - MARGIN - BAR_W;
   bar.y = GAME_HEIGHT - MARGIN - BAR_H;
+  // Needed so the bar receives `globalpointermove` while a drag is in flight.
+  bar.eventMode = "static";
 
   drawBarFrame(bar);
 
   const slots: MonsterSlot[] = [];
   for (let i = 0; i < 3; i += 1) {
-    const slot = createMonsterSlot(() => openDetail(i));
-    slot.container.x = PAD + i * (SQUARE + GAP);
+    const index = i;
+    const slot = createMonsterSlot((event) => beginPress(index, event));
+    slot.container.x = slotHomeX(i);
     slot.container.y = PAD;
     bar.addChild(slot.container);
     slots.push(slot);
   }
 
   drawItemSlot(bar);
+
+  // --- Drag-to-reorder the party (decides battle/leadoff order) ---------------
+  // `slots[i]` always renders `roster[i]`, so slot index == roster index. While
+  // dragging we move slot containers around for feedback, then on drop splice
+  // the shared roster array in place (it is `runState.player.team`, so the new
+  // lead order persists) and `refresh()` repaints every slot from home.
+  let drag: {
+    index: number;
+    startX: number;
+    startY: number;
+    grabDX: number;
+    started: boolean;
+    targetIndex: number;
+  } | null = null;
+
+  function resetSlotPositions(): void {
+    for (let i = 0; i < slots.length; i += 1) {
+      slots[i].container.x = slotHomeX(i);
+      slots[i].container.y = PAD;
+      slots[i].container.alpha = 1;
+    }
+  }
+
+  function beginPress(index: number, event: FederatedPointerEvent): void {
+    if (!roster[index]) {
+      return;
+    }
+    const local = bar.toLocal(event.global);
+    drag = {
+      index,
+      startX: local.x,
+      startY: local.y,
+      grabDX: local.x - slotHomeX(index),
+      started: false,
+      targetIndex: index
+    };
+  }
+
+  function onDragMove(event: FederatedPointerEvent): void {
+    if (!drag) {
+      return;
+    }
+    const local = bar.toLocal(event.global);
+    const slot = slots[drag.index];
+
+    if (!drag.started) {
+      if (Math.hypot(local.x - drag.startX, local.y - drag.startY) < DRAG_THRESHOLD) {
+        return;
+      }
+      drag.started = true;
+      bar.setChildIndex(slot.container, bar.children.length - 1);
+      slot.container.alpha = 0.92;
+      slot.container.cursor = "grabbing";
+    }
+
+    const lastPos = roster.length - 1;
+    const x = clamp(local.x - drag.grabDX, slotHomeX(0), slotHomeX(lastPos));
+    slot.container.x = x;
+    slot.container.y = PAD - 5;
+
+    // Insertion point from the dragged slot's center.
+    drag.targetIndex = clamp(Math.round((x - slotHomeX(0)) / (SQUARE + GAP)), 0, lastPos);
+
+    // Lay the other slots out around the gap the drag would open.
+    const order: number[] = [];
+    for (let i = 0; i < roster.length; i += 1) {
+      if (i !== drag.index) {
+        order.push(i);
+      }
+    }
+    order.splice(drag.targetIndex, 0, drag.index);
+    for (let pos = 0; pos < order.length; pos += 1) {
+      const si = order[pos];
+      if (si !== drag.index) {
+        slots[si].container.x = slotHomeX(pos);
+      }
+    }
+  }
+
+  function onDragEnd(): void {
+    if (!drag) {
+      return;
+    }
+    const finished = drag;
+    drag = null;
+    slots[finished.index].container.cursor = "grab";
+
+    if (!finished.started) {
+      resetSlotPositions();
+      openDetail(finished.index);
+      return;
+    }
+
+    if (finished.targetIndex !== finished.index) {
+      const [moved] = roster.splice(finished.index, 1);
+      roster.splice(finished.targetIndex, 0, moved);
+      onReorder?.();
+    }
+    refresh();
+    resetSlotPositions();
+  }
+
+  bar.on("globalpointermove", onDragMove);
+  bar.on("pointerup", onDragEnd);
+  bar.on("pointerupoutside", onDragEnd);
 
   // Detail modal.
   const overlay = new Container();
@@ -178,6 +311,8 @@ export function createTeamHud(roster: MonsterState[]): TeamHudView {
   detailPanel.addChild(detailFrame);
 
   const detailContent = new Container();
+  // Static so it receives `globalpointermove` while a move cell is dragged.
+  detailContent.eventMode = "static";
   detailPanel.addChild(detailContent);
 
   const closeButton = createCloseButton(() => closeDetail());
@@ -187,18 +322,138 @@ export function createTeamHud(roster: MonsterState[]): TeamHudView {
 
   let openIndex: number | null = null;
 
+  // --- Drag-to-reorder a monster's moves (inside the detail window) ----------
+  // Each rebuild registers the freshly-built move cells (index-aligned to
+  // `monster.moves`). On drop the moves array is spliced in place — it is part
+  // of the persistent `MonsterState`, so the new order carries into battle
+  // (Q/W/E/R). Mirrors the party drag above but scoped to the detail content.
+  let moveDrag: {
+    index: number;
+    startX: number;
+    startY: number;
+    grabDX: number;
+    started: boolean;
+    targetIndex: number;
+  } | null = null;
+  let moveCells: Container[] = [];
+  let moveMonster: MonsterState | null = null;
+
+  function renderDetail(monster: MonsterState): void {
+    moveDrag = null;
+    moveMonster = monster;
+    moveCells = buildDetailContent(detailContent, monster);
+    for (let i = 0; i < moveCells.length; i += 1) {
+      if (!monster.moves[i]) {
+        continue;
+      }
+      const index = i;
+      const cell = moveCells[i];
+      cell.eventMode = "static";
+      cell.cursor = "grab";
+      cell.on("pointerdown", (event) => beginMovePress(index, event));
+    }
+  }
+
+  function beginMovePress(index: number, event: FederatedPointerEvent): void {
+    if (!moveMonster || !moveMonster.moves[index]) {
+      return;
+    }
+    const local = detailContent.toLocal(event.global);
+    moveDrag = {
+      index,
+      startX: local.x,
+      startY: local.y,
+      grabDX: local.x - moveCellHomeX(index),
+      started: false,
+      targetIndex: index
+    };
+  }
+
+  function onMoveDragMove(event: FederatedPointerEvent): void {
+    if (!moveDrag || !moveMonster) {
+      return;
+    }
+    const cell = moveCells[moveDrag.index];
+    if (!cell) {
+      moveDrag = null;
+      return;
+    }
+    const local = detailContent.toLocal(event.global);
+
+    if (!moveDrag.started) {
+      if (Math.hypot(local.x - moveDrag.startX, local.y - moveDrag.startY) < DRAG_THRESHOLD) {
+        return;
+      }
+      moveDrag.started = true;
+      detailContent.setChildIndex(cell, detailContent.children.length - 1);
+      cell.alpha = 0.92;
+      cell.cursor = "grabbing";
+    }
+
+    const lastPos = moveMonster.moves.length - 1;
+    const x = clamp(local.x - moveDrag.grabDX, moveCellHomeX(0), moveCellHomeX(lastPos));
+    cell.x = x;
+    cell.y = MOVE_CELL_Y - 6;
+
+    moveDrag.targetIndex = clamp(Math.round((x - moveCellHomeX(0)) / (MOVE_CELL_W + MOVE_CELL_GAP)), 0, lastPos);
+
+    const order: number[] = [];
+    for (let i = 0; i < moveMonster.moves.length; i += 1) {
+      if (i !== moveDrag.index) {
+        order.push(i);
+      }
+    }
+    order.splice(moveDrag.targetIndex, 0, moveDrag.index);
+    for (let pos = 0; pos < order.length; pos += 1) {
+      const ci = order[pos];
+      if (ci !== moveDrag.index && moveCells[ci]) {
+        moveCells[ci].x = moveCellHomeX(pos);
+        moveCells[ci].y = MOVE_CELL_Y;
+      }
+    }
+  }
+
+  function onMoveDragEnd(): void {
+    if (!moveDrag) {
+      return;
+    }
+    const finished = moveDrag;
+    const monster = moveMonster;
+    moveDrag = null;
+
+    if (!finished.started || !monster) {
+      // A plain tap (or lost monster); just snap the cells back home.
+      if (monster) {
+        renderDetail(monster);
+      }
+      return;
+    }
+
+    if (finished.targetIndex !== finished.index) {
+      const [moved] = monster.moves.splice(finished.index, 1);
+      monster.moves.splice(finished.targetIndex, 0, moved);
+      onReorder?.();
+    }
+    renderDetail(monster);
+  }
+
+  detailContent.on("globalpointermove", onMoveDragMove);
+  detailContent.on("pointerup", onMoveDragEnd);
+  detailContent.on("pointerupoutside", onMoveDragEnd);
+
   function openDetail(index: number): void {
     const monster = roster[index];
     if (!monster) {
       return;
     }
     openIndex = index;
-    buildDetailContent(detailContent, monster);
+    renderDetail(monster);
     overlay.visible = true;
   }
 
   function closeDetail(): void {
     openIndex = null;
+    moveDrag = null;
     overlay.visible = false;
   }
 
@@ -209,7 +464,7 @@ export function createTeamHud(roster: MonsterState[]): TeamHudView {
     if (openIndex !== null) {
       const monster = roster[openIndex];
       if (monster) {
-        buildDetailContent(detailContent, monster);
+        renderDetail(monster);
       } else {
         closeDetail();
       }
@@ -256,11 +511,11 @@ function drawBarFrame(bar: Container): void {
   bar.addChild(sheen);
 }
 
-function createMonsterSlot(onTap: () => void): MonsterSlot {
+function createMonsterSlot(onPointerDown: (event: FederatedPointerEvent) => void): MonsterSlot {
   const container = new Container();
   container.eventMode = "static";
   container.cursor = "pointer";
-  container.on("pointertap", onTap);
+  container.on("pointerdown", onPointerDown);
 
   const bg = new Graphics();
   container.addChild(bg);
@@ -309,7 +564,7 @@ function updateMonsterSlot(slot: MonsterSlot, monster: MonsterState | undefined)
   const fainted = monster.currentHp <= 0;
 
   slot.container.eventMode = "static";
-  slot.container.cursor = "pointer";
+  slot.container.cursor = "grab";
   slot.empty.visible = false;
   slot.sprite.visible = true;
 
@@ -387,7 +642,7 @@ function createCloseButton(onTap: () => void): Container {
   return container;
 }
 
-function buildDetailContent(content: Container, monster: MonsterState): void {
+function buildDetailContent(content: Container, monster: MonsterState): Container[] {
   content.removeChildren().forEach((child) => child.destroy({ children: true }));
 
   const species = SPECIES[monster.speciesId];
@@ -495,15 +750,17 @@ function buildDetailContent(content: Container, monster: MonsterState): void {
   movesTitle.y = 390;
   content.addChild(movesTitle);
 
-  const cellW = 156;
-  const cellH = 64;
-  const cellGap = 8;
-  const cellY = 414;
+  const movesHint = new Text({ text: "拖动可调整顺序", style: styles.itemHint });
+  movesHint.x = 28 + movesTitle.width + 12;
+  movesHint.y = 394;
+  content.addChild(movesHint);
+
+  const moveCells: Container[] = [];
   for (let i = 0; i < 4; i += 1) {
-    const cellX = 28 + i * (cellW + cellGap);
     const moveId = monster.moves[i];
-    drawMoveCell(content, cellX, cellY, cellW, cellH, moveId);
+    moveCells.push(drawMoveCell(content, moveCellHomeX(i), MOVE_CELL_Y, MOVE_CELL_W, MOVE_CELL_H, moveId));
   }
+  return moveCells;
 }
 
 /**
@@ -548,38 +805,56 @@ function drawStatBar(
   }
 }
 
-function drawMoveCell(content: Container, x: number, y: number, w: number, h: number, moveId: string | undefined): void {
-  const cell = new Graphics();
-  cell.roundRect(x, y, w, h, 8).fill(PALETTE.panelEdgeDark);
-  cell.roundRect(x + 2, y + 2, w - 4, h - 4, 7).fill(PALETTE.panelBack);
+/**
+ * Build one move cell as a self-contained Container positioned at (x, y), with
+ * all children laid out in cell-local coordinates so the whole cell can be
+ * picked up and moved as a unit during a reorder drag. Returns the container.
+ */
+function drawMoveCell(
+  content: Container,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  moveId: string | undefined
+): Container {
+  const cell = new Container();
+  cell.x = x;
+  cell.y = y;
   content.addChild(cell);
+
+  const bg = new Graphics();
+  bg.roundRect(0, 0, w, h, 8).fill(PALETTE.panelEdgeDark);
+  bg.roundRect(2, 2, w - 4, h - 4, 7).fill(PALETTE.panelBack);
+  cell.addChild(bg);
 
   if (!moveId || !(moveId in MOVES)) {
     const dash = new Text({ text: "—", style: styles.pp });
     dash.anchor.set(0.5);
-    dash.x = x + w / 2;
-    dash.y = y + h / 2;
-    content.addChild(dash);
-    return;
+    dash.x = w / 2;
+    dash.y = h / 2;
+    cell.addChild(dash);
+    return cell;
   }
 
   const move = MOVES[moveId as keyof typeof MOVES];
   const meta = moveMeta(moveId as keyof typeof MOVES);
 
-  cell.roundRect(x + 2, y + 2, w - 4, h - 4, 7).stroke({ color: typeColor(meta.type), width: 1.5, alpha: 0.8 });
+  bg.roundRect(2, 2, w - 4, h - 4, 7).stroke({ color: typeColor(meta.type), width: 1.5, alpha: 0.8 });
 
   const name = new Text({ text: move.name, style: styles.moveName });
-  name.x = x + 10;
-  name.y = y + 9;
-  content.addChild(name);
+  name.x = 10;
+  name.y = 9;
+  cell.addChild(name);
 
-  drawPill(content, x + 10, y + 34, typeLabel(meta.type), typeColor(meta.type));
+  drawPill(cell, 10, 34, typeLabel(meta.type), typeColor(meta.type));
 
   const pp = new Text({ text: `PP ${move.pp}/${move.pp}`, style: styles.pp });
   pp.anchor.set(1, 0);
-  pp.x = x + w - 10;
-  pp.y = y + 38;
-  content.addChild(pp);
+  pp.x = w - 10;
+  pp.y = 38;
+  cell.addChild(pp);
+  return cell;
 }
 
 function drawPill(content: Container, x: number, y: number, label: string, color: string): number {
