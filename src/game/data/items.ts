@@ -97,6 +97,23 @@ export const ITEMS = {
 
 export type ItemId = keyof typeof ITEMS;
 
+/**
+ * Showdown `itemicons-sheet.png` sprite indices, used to crop each item's 24×24
+ * icon (sheet is 16 columns: `left=(n%16)*24, top=⌊n/16⌋*24`). Only items that
+ * exist in Showdown's battle item data have one — bag medicines, TMs, and the
+ * linking cord aren't in it (it's a battle sim), so they fall back to a drawn
+ * icon (see client/render/itemIcon.ts).
+ */
+export const ITEM_SPRITENUM: Partial<Record<ItemId, number>> = {
+  charcoal: 61, mysticWater: 300, miracleSeed: 292, magnet: 273, neverMeltIce: 305,
+  blackBelt: 32, poisonBarb: 343, softSand: 456, sharpBeak: 436, twistedSpoon: 520,
+  silverPowder: 447, hardStone: 187, spellTag: 461, dragonFang: 106, blackGlasses: 35,
+  fairyFeather: 754, silkScarf: 444, lifeOrb: 249, choiceBand: 68, choiceSpecs: 70,
+  choiceScarf: 69, leftovers: 242, assaultVest: 581, eviolite: 130, shellBell: 438,
+  fireStone: 142, waterStone: 529, thunderStone: 492, leafStone: 241, moonStone: 295,
+  metalCoat: 286, sharpClaw: 382, sitrusBerry: 448, lumBerry: 262
+};
+
 /** Localized display name for an item id (falls back to the raw id). */
 export function itemName(id: string | undefined): string {
   if (!id) return "无";

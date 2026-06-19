@@ -334,6 +334,22 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
   (立即用/携带/进背包/分解), an in-game bag UI, item reward sources, berry held
   auto-trigger, rare-candy level use, and disassembly — all Slice 2b/2c.
 
+### Item System — Slice 2b (in progress: icons + inventory model)
+
+- **Item icons use Showdown's `itemicons-sheet.png`** (16-col grid, 24×24 cells,
+  indexed by each item's `spritenum`). Showdown's battle data only indexes
+  battle-relevant items, so held items / type boosters / stones / berries have a
+  baked `ITEM_SPRITENUM` (data/items.ts) and crop their real icon; bag medicines,
+  TMs, and the linking cord aren't in Showdown's data, so they get a small drawn
+  placeholder keyed by item kind. `src/client/render/itemIcon.ts` (`createItemIcon`)
+  does the crop (via the dev sprite proxy, `nearest` scaling) / placeholder. Wired
+  into the team-detail "携带" row as a first visible/testable use.
+- **Single backpack slot** (doc §11): `PlayerState.backpack?: string` (one item id)
+  + `stashInBackpack` / `takeFromBackpack` / `isBackpackFull` in runState.ts.
+- NOT yet (rest of 2b): the bag UI panel (open from the team-bar items button),
+  use/equip/discard flow (wire `useItemOnMonster`; TM `learnChoice` → `moveLearnView`),
+  the pickup-decision modal (立即用/携带/进背包/分解), and an item reward source.
+
 ### Battle System
 
 - Lightweight turn-based battle engine.

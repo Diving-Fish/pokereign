@@ -7,6 +7,13 @@ export type Vec2 = { x: number; y: number };
 export type PlayerState = {
   position: Vec2;
   team: MonsterState[];
+  /**
+   * The single backpack slot (doc §11) — one stashed item id, or undefined. The
+   * deliberate 1-slot cap forces an immediate decision on pickup; everything else
+   * is either used at once, equipped onto a monster (`MonsterState.heldItem`), or
+   * disassembled.
+   */
+  backpack?: string;
 };
 
 /**
@@ -52,4 +59,25 @@ export function markEncounterCleared(run: RunState, encounterId: string): void {
   if (!run.clearedEncounterIds.includes(encounterId)) {
     run.clearedEncounterIds.push(encounterId);
   }
+}
+
+/** Whether the single backpack slot is occupied. */
+export function isBackpackFull(run: RunState): boolean {
+  return run.player.backpack !== undefined;
+}
+
+/** Stash an item in the backpack; returns false if the slot is already taken. */
+export function stashInBackpack(run: RunState, itemId: string): boolean {
+  if (run.player.backpack !== undefined) {
+    return false;
+  }
+  run.player.backpack = itemId;
+  return true;
+}
+
+/** Remove and return the backpack item id, if any. */
+export function takeFromBackpack(run: RunState): string | undefined {
+  const item = run.player.backpack;
+  run.player.backpack = undefined;
+  return item;
 }

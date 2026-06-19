@@ -5,7 +5,8 @@ import { getBattleSpriteUrl } from "../../game/data/art";
 import { MOVES } from "../../game/data/moves";
 import { SPECIES } from "../../game/data/species";
 import { speciesTypes } from "../../game/data/pokedex";
-import { itemName } from "../../game/data/items";
+import { ITEMS, itemName, type ItemId } from "../../game/data/items";
+import { createItemIcon } from "./itemIcon";
 import { computeStats, moveMeta, toCalcLevel } from "../../game/battle/smogonCalc";
 import { MAX_LEVEL, xpToNextLevel, type MonsterState } from "../../game/state/monster";
 import type { Stats } from "../../game/data/types";
@@ -675,9 +676,15 @@ function buildDetailContent(content: Container, monster: MonsterState): Containe
     pillX += pillWidth + 8;
   }
 
-  // Nature + held item.
+  // Nature + held item (with its icon when one is equipped).
   addLabelValue(content, 28, 252, "性格", natureLabel(monster.nature));
   addLabelValue(content, 28, 278, "携带", itemName(monster.heldItem));
+  if (monster.heldItem && monster.heldItem in ITEMS) {
+    const icon = createItemIcon(monster.heldItem as ItemId, 22);
+    icon.x = 188;
+    icon.y = 276;
+    content.addChild(icon);
+  }
 
   // HP + XP as bars spanning the left column.
   const barW = 156;
