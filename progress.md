@@ -192,10 +192,40 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 - Win → battle HP/status persists to the roster, the team earns XP, monsters
   level up (capped at 12), and the encounter is retired: its marker is removed
   and that tile no longer triggers a battle.
+- After a level-up, `evolveIfReady` runs and auto-evolves any monster that has
+  reached an evolution's `requiredLevel` (immediate, no confirmation), chaining
+  through multiple stages. Like the original games, both level-up and evolution
+  add exactly the gained max HP to current HP (rather than preserving a ratio).
+  Moves are kept.
+  Only Charmander → Charmeleon (Lv.4) is configured so far. Item-triggered
+  evolution (`EvolutionRule.requiredItem`) is defined in data but not wired —
+  it waits on the item system.
 - Lose (team wipe) → return to the map with the encounter still standing.
 - Everything that survives a return to the map lives in `RunState`, the
-  serializable snapshot the server will own. Next up (per plan): evolution
-  (reuses the `applyLevelUps` hook) and capture.
+  serializable snapshot the server will own.
+
+### Capture
+
+- Pure logic in `src/game/state/capture.ts`. `computeCatchChance` =
+  `baseRate × hpFactor × statusMult × classMult`, clamped to [0, 1]:
+  original-style HP factor `(3·max − 2·cur)/(3·max)` (1/3 at full HP → 1 near
+  faint), sleep/freeze ×2.5 and the rest ×1.5, and a tier multiplier
+  (normal ×1 / elite ×0.5 / boss ×0.25). `attemptCapture(target, rng)` rolls
+  the seeded run RNG → `captured | escaped | uncatchable`.
+- Data model: `MonsterSpecies.capture?: { baseRate, class? }` (`CaptureClass =
+  normal | elite | boss`); absent = a default normal profile (baseRate 0.5).
+  All multipliers/defaults are placeholders pending the config table.
+- Battle flow (`main.ts`): one attempt per battle (`captureUsed`); the capture
+  button throws at the active foe. Boss encounters (`MapEncounterObject.boss`)
+  and non-normal tiers are rejected as "uncatchable". A miss leaves the battle
+  ongoing (foe must then be defeated); a hit is terminal like a win — XP is
+  awarded, the encounter retired, and the catch joins at the level it was
+  caught at (overrides doc §7.1's "team level − 1").
+- Full team (3): the catch is parked and, after the battle tears down, the
+  replace-or-release modal (`captureReplaceView.ts`) opens over the map —
+  tap a member to swap it out, or release the catch. Map input is frozen while
+  it is open. Item-tiered/elite per-species capture and capture-shield breaking
+  are not built yet.
 
 ### Battle System
 

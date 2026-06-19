@@ -1,6 +1,6 @@
 import { SPECIES, type SpeciesId } from "../data/species";
 import type { MoveId } from "../data/moves";
-import type { Stats } from "../data/types";
+import type { MonsterSpecies, Stats } from "../data/types";
 import type { BattleMonster, BattleSide, BattleStatus } from "../battle/types";
 import { computeStats, toCalcLevel } from "../battle/smogonCalc";
 
@@ -127,9 +127,10 @@ export type LevelUpResult = {
 
 /**
  * Spend accumulated XP to advance levels (capped at {@link MAX_LEVEL}). Stats are
- * derived, so only `level`/`xp` change here; `currentHp` is rescaled to preserve
- * the pre-level HP ratio against the new (higher) max. A fainted monster stays
- * fainted. Call this *after* the battle's final HP has been written back.
+ * derived, so only `level`/`xp` change here; like the original games, `currentHp`
+ * gains exactly the amount the max HP grew (so a level-up partially heals rather
+ * than just preserving a percentage). A fainted monster stays fainted. Call this
+ * *after* the battle's final HP has been written back.
  */
 export function applyLevelUps(state: MonsterState): LevelUpResult {
   const from = state.level;
@@ -137,7 +138,7 @@ export function applyLevelUps(state: MonsterState): LevelUpResult {
     return { leveledUp: false, from, to: from };
   }
 
-  const ratio = state.currentHp / maxHpAt(state);
+  const maxHpBefore = maxHpAt(state);
   while (state.level < MAX_LEVEL && state.xp >= xpToNextLevel(state.level)) {
     state.xp -= xpToNextLevel(state.level);
     state.level += 1;
@@ -145,7 +146,49 @@ export function applyLevelUps(state: MonsterState): LevelUpResult {
 
   const to = state.level;
   if (to > from && state.currentHp > 0) {
-    state.currentHp = Math.max(1, Math.round(ratio * maxHpAt(state)));
+    const maxHpAfter = maxHpAt(state);
+    state.currentHp = Math.min(maxHpAfter, state.currentHp + (maxHpAfter - maxHpBefore));
   }
   return { leveledUp: to > from, from, to };
+}
+
+export type EvolutionResult = {
+  evolved: boolean;
+  /** Species before evolving (unchanged if `evolved` is false). */
+  fromSpeciesId: SpeciesId;
+  /** Species after evolving. */
+  toSpeciesId: SpeciesId;
+};
+
+/**
+ * Apply any level-gated evolution the monster now qualifies for. The loop chains
+ * through multiple stages if a single level jump crosses several thresholds.
+ * Stats/types/name are derived from `speciesId`, so only the id changes here;
+ * like the original games, `currentHp` gains exactly the amount the max HP grew.
+ * Moves are kept as-is — evolving never overwrites a learned moveset. A fainted
+ * monster does not evolve. Item-triggered evolution
+ * (`requiredItem`) is handled by the item system, not here. Call this *after*
+ * {@link applyLevelUps}.
+ */
+export function evolveIfReady(state: MonsterState): EvolutionResult {
+  const from = state.speciesId;
+  if (state.currentHp <= 0) {
+    return { evolved: false, fromSpeciesId: from, toSpeciesId: from };
+  }
+
+  let evolved = false;
+  for (;;) {
+    const species: MonsterSpecies = SPECIES[state.speciesId];
+    const rule = species.evolutions?.find(
+      (evo) => evo.requiredLevel !== undefined && state.level >= evo.requiredLevel
+    );
+    if (!rule) break;
+    const maxHpBefore = maxHpAt(state);
+    state.speciesId = rule.targetSpeciesId as SpeciesId;
+    const maxHpAfter = maxHpAt(state);
+    state.currentHp = Math.min(maxHpAfter, state.currentHp + (maxHpAfter - maxHpBefore));
+    evolved = true;
+  }
+
+  return { evolved, fromSpeciesId: from, toSpeciesId: state.speciesId };
 }

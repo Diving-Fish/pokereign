@@ -6,18 +6,22 @@ import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayo
 import { createMapRenderView, removeEncounterMarker, updateMapPathOverlay, updateMapRenderView } from "./client/render/mapView";
 import { fitRendererToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
 import { createTeamHud, type TeamHudView } from "./client/render/teamHud";
+import { createCaptureReplaceView, type CaptureReplaceView } from "./client/render/captureReplaceView";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
-import { applyLevelUps, createMonsterState, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating } from "./game/state/monster";
+import { applyLevelUps, createMonsterState, evolveIfReady, MAX_LEVEL, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating, type MonsterState } from "./game/state/monster";
+import { attemptCapture, isDirectlyCapturable, type CaptureResult } from "./game/state/capture";
+import { Rng } from "./game/state/rng";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
 import { getAllAnimatedBattleSpriteUrls, getAllBattleSpriteUrls, getAnimatedBattleSpriteUrl, getBattleSpriteUrl } from "./game/data/art";
 import { createAnimatedBattler, type AnimatedBattler } from "./client/render/animatedBattler";
 import { loadGif } from "./client/render/gifLoader";
 import "pixi.js/gif";
 import type { MoveId } from "./game/data/moves";
+import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
 import { findPath, type TileCoord } from "./game/map/pathfinding";
@@ -146,6 +150,13 @@ const runState = createRunState({
 });
 const playerRoster = runState.player.team;
 
+/** Hard team-size cap; a capture beyond this forces a replace-or-release choice. */
+const MAX_TEAM_SIZE = 3;
+
+// Seeded RNG for run-level rolls (capture, …). Rebuilt from `runState.seed` so it
+// stays deterministic; persisting its cursor rides along with the server-RNG work.
+const rng = new Rng(runState.seed);
+
 const root = new Container();
 const sceneLayer = new Container();
 app.stage.addChild(root);
@@ -168,6 +179,13 @@ const uiLayer = new Container();
 root.addChild(uiLayer);
 const teamHud: TeamHudView = createTeamHud(runState.player.team);
 uiLayer.addChild(teamHud.bar, teamHud.overlay);
+
+// Roster-replace modal, shown when a capture lands on a full team.
+const captureReplaceView: CaptureReplaceView = createCaptureReplaceView({
+  onReplace: (index) => resolveCaptureReplace(index),
+  onRelease: () => resolveCaptureRelease()
+});
+uiLayer.addChild(captureReplaceView.overlay);
 
 // 4 tiles/sec → 250 ms per tile. Movement is grid-locked: one tile per step,
 // no diagonals, with the on-screen position interpolated across the step so the
@@ -197,6 +215,14 @@ let battleView: BattleStateView | null = null;
 let activeEncounterId: string | null = null;
 // The defeated foe's in-game level, used to compute the XP reward on victory.
 let activeFoeLevel = 0;
+// One capture attempt per battle: set once the player throws, win or lose.
+let captureUsed = false;
+// Whether the current foe is a boss/elite form — never directly capturable,
+// regardless of its species' capture profile.
+let activeFoeIsBoss = false;
+// A landed capture that needs a roster slot freed; resolved by the replace modal
+// once the battle playback has torn down and we are back on the map.
+let pendingCapturedMonster: MonsterState | null = null;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -286,6 +312,12 @@ function requestPathTo(tileX: number, tileY: number): void {
 }
 
 function updateMap(deltaMs: number): void {
+  // Freeze the overworld while the capture replace-or-release decision is open.
+  if (captureReplaceView.isOpen()) {
+    movePath = [];
+    return;
+  }
+
   // Consume the frame's time across one or more tile steps so holding a key
   // walks at a steady 2.5 tiles/sec with no per-tile micro-pause.
   let remaining = deltaMs;
@@ -356,6 +388,8 @@ function startBattle(encounter: MapEncounterObject): void {
   battleIntroStart = elapsed;
   activeEncounterId = encounter.id;
   activeFoeLevel = encounter.level;
+  captureUsed = false;
+  activeFoeIsBoss = encounter.boss === true;
   const foe = toBattleMonster(createMonsterState(encounter.speciesId, encounter.level), "foe");
   battleTeam = playerRoster.map((state) => toBattleMonster(state, "player"));
   battle = new BattleEngine({
@@ -407,12 +441,104 @@ function trySwitch(index: number): void {
   runBattleTurn({ type: "switch", targetIndex: index });
 }
 
-/** Capture is not implemented yet; surface a short banner over the controls. */
+/**
+ * Throw at the active foe. One attempt per battle (point 4): a miss burns the
+ * chance and the foe must then be defeated. Elite/boss tiers can't be caught
+ * directly. Resolves against the seeded run RNG; success returns to the map.
+ */
 function tryCapture(): void {
   if (!battle || !battleView || isPlaybackActive()) {
     return;
   }
-  showTransientMessage("捕捉功能尚未实装，敬请期待！");
+  if (captureUsed) {
+    showTransientMessage("这场战斗的捕捉机会已经用过了。");
+    return;
+  }
+
+  const foe = battleView.opponent.active;
+  const profile = (SPECIES[foe.speciesId] as MonsterSpecies).capture;
+  if (activeFoeIsBoss || !isDirectlyCapturable(profile)) {
+    showTransientMessage(`${foe.name} 无法被直接捕捉！`);
+    return;
+  }
+
+  captureUsed = true;
+  captureDisplayedHp(battleView);
+  const result = attemptCapture(
+    { currentHp: foe.currentHp, maxHp: foe.maxHp, status: foe.status, capture: profile },
+    rng
+  );
+  queueCapturePlayback(foe, result);
+}
+
+/**
+ * Build the post-throw playback. A success is terminal and treated like a win
+ * (encounter retired, return to map) plus an XP award (point 5); the catch is
+ * added to the roster, or parked for the replace modal when the team is full.
+ * A miss leaves the battle ongoing.
+ */
+function queueCapturePlayback(foe: BattleMonster, result: CaptureResult): void {
+  playbackSteps = [];
+
+  if (result.outcome !== "captured") {
+    pendingOutcome = "ongoing";
+    playbackSteps.push({ kind: "text", text: `可恶！${foe.name} 挣脱了精灵球。`, duration: 900, elapsed: 0 });
+    playbackSteps.push({ kind: "text", text: "这场战斗只能将它打倒了。", duration: 900, elapsed: 0 });
+    return;
+  }
+
+  // Terminal: persist player HP, then treat the encounter as cleared on return.
+  persistBattleResult();
+  pendingOutcome = "player";
+  playbackSteps.push({ kind: "text", text: `太好了！成功捕捉了 ${foe.name}！`, duration: 1000, elapsed: 0 });
+
+  const reward = grantBattleXp();
+  if (reward > 0) {
+    playbackSteps.push({ kind: "text", text: `队伍每只获得了 ${reward} 经验！`, duration: 800, elapsed: 0 });
+  }
+  for (const text of applyTeamLevelUps()) {
+    playbackSteps.push({ kind: "text", text, duration: 800, elapsed: 0 });
+  }
+
+  // Joins at the level it was caught at — what you see in the wild is what you
+  // get (overrides doc §7.1's "team level - 1").
+  const captured = createMonsterState(foe.speciesId, clamp(foe.level, 1, MAX_LEVEL));
+
+  if (playerRoster.length < MAX_TEAM_SIZE) {
+    playerRoster.push(captured);
+    playbackSteps.push({ kind: "text", text: `${SPECIES[captured.speciesId].name} 加入了队伍！`, duration: 900, elapsed: 0 });
+  } else {
+    pendingCapturedMonster = captured;
+    playbackSteps.push({ kind: "text", text: "队伍已满，需要决定它的去留。", duration: 900, elapsed: 0 });
+  }
+}
+
+/** Swap the captured monster in for roster slot `index`; release the old one. */
+function resolveCaptureReplace(index: number): void {
+  const captured = pendingCapturedMonster;
+  if (!captured || index < 0 || index >= playerRoster.length) {
+    return;
+  }
+  const replaced = playerRoster[index];
+  playerRoster[index] = captured;
+  pendingCapturedMonster = null;
+  captureReplaceView.close();
+  teamHud.refresh();
+  showTransientMessage(`${SPECIES[replaced.speciesId].name} 离队，${SPECIES[captured.speciesId].name} 加入了队伍！`);
+}
+
+/** Let the catch go and keep the team as it stands. */
+function resolveCaptureRelease(): void {
+  const captured = pendingCapturedMonster;
+  pendingCapturedMonster = null;
+  captureReplaceView.close();
+  if (captured) {
+    showTransientMessage(`放走了 ${SPECIES[captured.speciesId].name}。`);
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function showTransientMessage(text: string): void {
@@ -496,6 +622,10 @@ function applyTeamLevelUps(): string[] {
     const result = applyLevelUps(monster);
     if (result.leveledUp) {
       messages.push(`${SPECIES[monster.speciesId].name} 升到了 Lv.${result.to}！`);
+      const evo = evolveIfReady(monster);
+      if (evo.evolved) {
+        messages.push(`咦……？${SPECIES[evo.fromSpeciesId].name} 进化成了 ${SPECIES[evo.toSpeciesId].name}！`);
+      }
     }
   }
   return messages;
@@ -632,6 +762,12 @@ function finishBattlePlaybackIfNeeded(): void {
     pendingOutcome = "ongoing";
     // The roster's HP/level may have changed; repaint the team HUD slots.
     teamHud.refresh();
+
+    // A capture that landed on a full team now needs a slot decision; raise the
+    // replace modal over the map (it owns the roster mutation + HUD refresh).
+    if (pendingCapturedMonster) {
+      captureReplaceView.open(pendingCapturedMonster, playerRoster);
+    }
   }
 }
 
