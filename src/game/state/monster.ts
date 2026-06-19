@@ -1,4 +1,5 @@
 import { SPECIES, type SpeciesId } from "../data/species";
+import { speciesTypes } from "../data/pokedex";
 import type { MoveId } from "../data/moves";
 import type { MonsterSpecies, Stats } from "../data/types";
 import type { BattleMonster, BattleSide, BattleStatus } from "../battle/types";
@@ -43,6 +44,32 @@ export type MonsterState = {
 // server-authoritative (tracked alongside the seeded-RNG follow-up).
 let nextInstanceId = 1;
 
+/** Max moves a monster can know at once. */
+export const MAX_MOVES = 4;
+
+/**
+ * The moves a freshly created monster of `speciesId` knows at `level`: the most
+ * recent {@link MAX_MOVES} learnset entries at/under that level (dedup, keeping
+ * the latest occurrence). Falls back to `defaultMoves` when the species has no
+ * learnset.
+ */
+export function knownMovesAtLevel(speciesId: SpeciesId, level: number): MoveId[] {
+  const species: MonsterSpecies = SPECIES[speciesId];
+  if (!species.learnset) {
+    return (species.defaultMoves ?? []).slice(0, MAX_MOVES) as MoveId[];
+  }
+  const ordered: MoveId[] = [];
+  for (const entry of species.learnset) {
+    if (entry.level > level) continue;
+    const moveId = entry.moveId as MoveId;
+    // Re-learning bumps the move to the end so the latest 4 win the slot race.
+    const existing = ordered.indexOf(moveId);
+    if (existing >= 0) ordered.splice(existing, 1);
+    ordered.push(moveId);
+  }
+  return ordered.slice(-MAX_MOVES);
+}
+
 type CreateMonsterStateOptions = {
   ivs?: Stats;
   evs?: Stats;
@@ -51,7 +78,6 @@ type CreateMonsterStateOptions = {
 };
 
 export function createMonsterState(speciesId: SpeciesId, level: number, options: CreateMonsterStateOptions = {}): MonsterState {
-  const species = SPECIES[speciesId];
   const ivs = options.ivs ?? DEFAULT_IVS;
   const evs = options.evs ?? DEFAULT_EVS;
   const nature = options.nature ?? DEFAULT_NATURE;
@@ -67,7 +93,7 @@ export function createMonsterState(speciesId: SpeciesId, level: number, options:
     nature,
     status: null,
     currentHp: maxHp,
-    moves: species.defaultMoves.slice(0, 4) as MoveId[]
+    moves: knownMovesAtLevel(speciesId, level)
   };
 }
 
@@ -82,7 +108,7 @@ export function toBattleMonster(state: MonsterState, side: BattleSide): BattleMo
     side,
     speciesId: state.speciesId,
     name: species.name,
-    types: species.types,
+    types: speciesTypes(state.speciesId),
     level: state.level,
     calcLevel,
     ivs: state.ivs,
@@ -191,4 +217,59 @@ export function evolveIfReady(state: MonsterState): EvolutionResult {
   }
 
   return { evolved, fromSpeciesId: from, toSpeciesId: state.speciesId };
+}
+
+/** A move a monster qualifies to learn but couldn't auto-fit (4 slots full). */
+export type PendingLearn = {
+  instanceId: string;
+  speciesId: SpeciesId;
+  moveId: MoveId;
+};
+
+export type LearnsetResult = {
+  /** Moves auto-learned into a free slot (state already updated). */
+  learned: MoveId[];
+  /** Moves the monster qualifies for but has no free slot — needs a decision. */
+  pending: MoveId[];
+};
+
+/**
+ * Teach any learnset moves unlocked by a level change from `fromLevel` to the
+ * monster's current level (exclusive→inclusive), using the *current* species —
+ * so call this *after* {@link applyLevelUps} and {@link evolveIfReady}, with
+ * `fromLevel` captured before the level-up. Already-known moves are skipped.
+ * Moves that fit a free slot are learned immediately; the rest are returned as
+ * `pending` for the player to resolve (replace which move, or skip).
+ */
+export function applyLearnset(state: MonsterState, fromLevel: number): LearnsetResult {
+  const learned: MoveId[] = [];
+  const pending: MoveId[] = [];
+  const species: MonsterSpecies = SPECIES[state.speciesId];
+  if (!species.learnset) {
+    return { learned, pending };
+  }
+
+  for (const entry of species.learnset) {
+    if (entry.level <= fromLevel || entry.level > state.level) continue;
+    const moveId = entry.moveId as MoveId;
+    if (state.moves.includes(moveId)) continue;
+    if (state.moves.length < MAX_MOVES) {
+      state.moves.push(moveId);
+      learned.push(moveId);
+    } else {
+      pending.push(moveId);
+    }
+  }
+  return { learned, pending };
+}
+
+/**
+ * Resolve a pending learn: replace the move at `slotIndex` with `moveId`. A
+ * `slotIndex` out of range is treated as "skip" (the move is not learned).
+ */
+export function learnMoveIntoSlot(state: MonsterState, moveId: MoveId, slotIndex: number): boolean {
+  if (state.moves.includes(moveId)) return false;
+  if (slotIndex < 0 || slotIndex >= state.moves.length) return false;
+  state.moves[slotIndex] = moveId;
+  return true;
 }

@@ -4,6 +4,7 @@ import { adjustColor, hpColors, PALETTE, pixelText, typeColor } from "./theme";
 import { createButton } from "./button";
 import { getBattleSpriteUrl } from "../../game/data/art";
 import { SPECIES } from "../../game/data/species";
+import { speciesTypes } from "../../game/data/pokedex";
 import { computeStats, toCalcLevel } from "../../game/battle/smogonCalc";
 import type { MonsterState } from "../../game/state/monster";
 
@@ -184,7 +185,7 @@ function buildMonsterCard(x: number, y: number, monster: MonsterState, opts: Car
   card.y = y;
 
   const species = SPECIES[monster.speciesId];
-  const color = typeColor(species.types[0]);
+  const color = typeColor(speciesTypes(monster.speciesId)[0]);
   const fainted = monster.currentHp <= 0;
 
   // Catch glow: soft concentric gold halo behind the frame.

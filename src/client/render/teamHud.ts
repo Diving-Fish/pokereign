@@ -1,9 +1,10 @@
 import { Assets, Container, FederatedPointerEvent, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
 import { GAME_HEIGHT, GAME_WIDTH } from "./screen";
-import { adjustColor, hpColors, PALETTE, pixelText, typeColor } from "./theme";
+import { adjustColor, hpColors, PALETTE, pixelText, typeColor, typeLabel } from "./theme";
 import { getBattleSpriteUrl } from "../../game/data/art";
 import { MOVES } from "../../game/data/moves";
 import { SPECIES } from "../../game/data/species";
+import { speciesTypes } from "../../game/data/pokedex";
 import { computeStats, moveMeta, toCalcLevel } from "../../game/battle/smogonCalc";
 import { MAX_LEVEL, xpToNextLevel, type MonsterState } from "../../game/state/monster";
 import type { Stats } from "../../game/data/types";
@@ -51,17 +52,6 @@ const DETAIL_W = 700;
 const DETAIL_H = 492;
 const DETAIL_X = Math.round((GAME_WIDTH - DETAIL_W) / 2);
 const DETAIL_Y = Math.round((GAME_HEIGHT - DETAIL_H) / 2);
-
-const TYPE_LABELS: Record<string, string> = {
-  normal: "一般",
-  fire: "火",
-  water: "水",
-  grass: "草",
-  electric: "电",
-  flying: "飞行",
-  rock: "岩石",
-  ground: "地面"
-};
 
 const NATURE_LABELS: Record<string, string> = {
   Hardy: "勤奋",
@@ -116,10 +106,6 @@ const styles = {
   slotEmpty: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 11, fontWeight: "700" })),
   itemHint: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 10, fontWeight: "700" }))
 };
-
-function typeLabel(type: string): string {
-  return TYPE_LABELS[type] ?? type;
-}
 
 function natureLabel(nature: string): string {
   return NATURE_LABELS[nature] ?? nature;
@@ -559,8 +545,7 @@ function updateMonsterSlot(slot: MonsterSlot, monster: MonsterState | undefined)
     return;
   }
 
-  const species = SPECIES[monster.speciesId];
-  const color = typeColor(species.types[0]);
+  const color = typeColor(speciesTypes(monster.speciesId)[0]);
   const fainted = monster.currentHp <= 0;
 
   slot.container.eventMode = "static";
@@ -648,7 +633,8 @@ function buildDetailContent(content: Container, monster: MonsterState): Containe
   const species = SPECIES[monster.speciesId];
   const calcLevel = toCalcLevel(monster.level);
   const { stats, maxHp } = computeStats(monster.speciesId, calcLevel, monster.ivs, monster.evs, monster.nature);
-  const primaryColor = typeColor(species.types[0]);
+  const types = speciesTypes(monster.speciesId);
+  const primaryColor = typeColor(types[0]);
 
   // Header.
   const title = new Text({ text: species.name, style: styles.title });
@@ -683,7 +669,7 @@ function buildDetailContent(content: Container, monster: MonsterState): Containe
 
   // Type pills.
   let pillX = 28;
-  for (const type of species.types) {
+  for (const type of types) {
     const pillWidth = drawPill(content, pillX, 224, typeLabel(type), typeColor(type));
     pillX += pillWidth + 8;
   }

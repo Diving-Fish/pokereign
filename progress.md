@@ -227,6 +227,83 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
   it is open. Item-tiered/elite per-species capture and capture-shield breaking
   are not built yet.
 
+### Type System (18 types, calc-sourced chart)
+
+- `ElementType` (`src/game/data/types.ts`) now covers all **18** types, in canonical
+  Pokédex order (`ELEMENT_TYPES`). `theme.ts` carries the 18-type color + zh-label
+  tables (`TYPE_COLORS`/`typeColor`, `TYPE_LABELS`/`typeLabel`); the duplicated
+  per-file `TYPE_LABELS` in `teamHud.ts` and `battleControls.ts` were removed in favor
+  of the shared `typeLabel`.
+- `typeEffectiveness` (`src/game/battle/typeChart.ts`) is now **derived from
+  `@smogon/calc`** (`GEN.types.get(id).effectiveness`) instead of a hand-maintained
+  chart, matching the "数值一律以 calc 为准" convention. Lowercase→capitalized keys are
+  cached per attacking type. Verified against the tricky immunities (fighting→ghost,
+  dragon→fairy, ground→flying, electric→ground all 0; water→fire/rock = 4×).
+
+### Movesets & Level-up Learning
+
+- Species carry an optional `learnset: { level, moveId }[]` (in-game Lv.1-12 table;
+  `src/game/data/types.ts`). `knownMovesAtLevel(speciesId, level)` derives the known
+  moves (the most recent {@link MAX_MOVES}=4 at/under that level), used by
+  `createMonsterState`; species with no learnset fall back to `defaultMoves`.
+- On level-up, `applyLearnset(state, fromLevel)` (`src/game/state/monster.ts`) teaches
+  moves unlocked in `(fromLevel, level]` on the **current** species — so it runs after
+  `applyLevelUps` + `evolveIfReady`, learning the evolved form's moves. Moves that fit
+  a free slot are learned inline; the rest are returned as `pending` and queued on
+  `pendingLearns` in `main.ts`.
+- **Full-slot learns are deferred to after the battle** (design decision): once the
+  battle tears down, `openNextPostBattleModal()` drains a single post-battle decision
+  queue — first the capture replace modal (if any), then each queued move-learn via
+  `moveLearnView` (`src/client/render/moveLearnView.ts`). The learn modal shows the new
+  move (type pill, category glyph, power/PP) and the four current moves as tap-to-
+  forget cards, plus a skip button; `learnMoveIntoSlot` does the swap. Map input is
+  frozen while either modal is open. Stale learns (monster left the team) are dropped.
+- Verified the charmander line end-to-end: L3 (scratch/ember/smokescreen) → L4 evolves
+  to charmeleon and auto-learns flameBurst into the free slot → L5 queues growl for a
+  post-battle replace decision.
+
+### Species Data (calc-sourced)
+
+- `MonsterSpecies` base stats / types / primary ability are now **derived from
+  `@smogon/calc`'s gen-9 dex** (`src/game/data/pokedex.ts`: `speciesTypes`,
+  `speciesAbility`, `speciesBaseStats`), keyed by the entry id (which must match
+  calc's species id). `types`/`baseStats`/`ability`/`defaultMoves`/`dexNumber` are
+  all optional now and only set to override calc. `baseStats` was already dead data
+  (calc derives stats from the id), and deriving `types` fixed stale local data —
+  e.g. bulbasaur is now correctly Grass/Poison.
+- A new species entry therefore needs only: id (calc id), zh `name`, `spriteSlug`,
+  `spriteAnchors` (gen5 fallback tuning), `learnset`, `evolutions`, `capture`.
+- `satisfies` gotcha: `SPECIES[id]` narrows to the literal entry type, so optional
+  fields aren't visible — `pokedex.ts` and `knownMovesAtLevel` read through a
+  `MonsterSpecies` annotation/cast.
+- Verified at runtime: `toBattleMonster` resolves types + calc stats for all four
+  starters (bulbasaur L5 → grass/poison, maxHp 104).
+
+### Species & Move Pool (Slice 3b — bulk content)
+
+- **93 species across 40 evolution lines** authored in `src/game/data/species.ts`
+  from the `roster.md` ecology plan (18-type coverage; every type ≥2 lines, most
+  ≥3). Base stats/types/ability come from calc (Slice 3a), so entries carry only
+  id/name/spriteSlug/learnset/evolutions(/capture). Compact builders `L(level,
+  ...moveIds)` / `evoLv` / `evoItem` keep the file terse.
+- **Move pool expanded to 128 moves** (`src/game/data/moves.ts`), a per-type kit
+  (early/mid/strong/status) so learnsets pull type-appropriate moves. Every
+  `calcName` is verified to resolve in `@smogon/calc` (Low Kick reads bp=0 — its
+  power is weight-based, computed at runtime).
+- Evolutions: level-gated ones auto-trigger (三段 Lv.4/8, 二段 Lv.6). **Item/stone
+  evolutions use `requiredItem` placeholders** (火/水/雷/叶/月之石, 连接绳, 金属外膜,
+  锐利之爪) — they don't fire yet (待 Phase 2 item system); those lines stay at base.
+  Eevee is one base with three stone-gated branches (water/thunder/fire).
+- Rare terminal lines (dragonite, hydreigon) carry a lower-rate `capture` profile.
+- Verified: integrity check (all learnset moveIds ∈ MOVES, all evolution targets ∈
+  SPECIES, all 93 ids resolve in calc) + a runtime sweep (all 93 × Lv.1/5/10
+  materialize with 1–4 valid moves and positive HP; charmander grows
+  charmander→charmeleon→charizard; pikachu correctly does NOT auto-evolve).
+- NOTE: the prototype map (`prototypeMap.ts`) still scatters only the original 4
+  species — wiring the new roster into biome-based encounters is Phase 3 (生态群落).
+  Until then the new species are reachable via the dev GM hook
+  (`window.gmStartBattle("dratini", 5)`).
+
 ### Battle System
 
 - Lightweight turn-based battle engine.
@@ -337,7 +414,9 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 - `src/game/state/runState.ts`: Serializable `RunState` snapshot (seed, mapId, cleared encounters, player position + team).
 - `src/game/state/monster.ts`: Authoritative `MonsterState`, battle materialization, XP rewards, and level-ups.
 - `src/game/state/rng.ts`: Seeded deterministic `Rng` (for upcoming damage-roll / sync work).
-- `src/game/data/species.ts`: Species stats, moves, sprite slugs, and sprite anchor tuning.
+- `src/game/data/species.ts`: Species registry (id, zh name, sprite slug/anchors, learnset, evolutions, capture). Base stats/types/ability come from calc.
+- `src/game/data/pokedex.ts`: calc-sourced base stats / types / primary ability resolvers (`speciesTypes`/`speciesAbility`/`speciesBaseStats`).
+- `src/client/render/moveLearnView.ts`: post-battle "learn new move / replace which" modal (full-slot level-up learns).
 - `src/game/data/moves.ts`: Move data and animation categories.
 - `src/game/data/art.ts`: gen5 (PNG) + ani (GIF) Pokémon sprite URL generation.
 - `src/client/render/screen.ts`: logical `960x540` constants + hi-DPI renderer fitting.

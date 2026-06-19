@@ -1,52 +1,32 @@
+import { Generations, toID } from "@smogon/calc";
 import type { ElementType } from "../data/types";
 
-const CHART: Partial<Record<ElementType, Partial<Record<ElementType, number>>>> = {
-  fire: {
-    grass: 2,
-    water: 0.5,
-    fire: 0.5,
-    rock: 0.5
-  },
-  water: {
-    fire: 2,
-    rock: 2,
-    ground: 2,
-    water: 0.5,
-    grass: 0.5
-  },
-  grass: {
-    water: 2,
-    rock: 2,
-    ground: 2,
-    fire: 0.5,
-    grass: 0.5,
-    flying: 0.5
-  },
-  flying: {
-    grass: 2,
-    rock: 0.5,
-    electric: 0.5
-  },
-  rock: {
-    fire: 2,
-    flying: 2,
-    ground: 0.5
-  },
-  ground: {
-    fire: 2,
-    electric: 2,
-    grass: 0.5,
-    flying: 0
-  },
-  electric: {
-    water: 2,
-    flying: 2,
-    grass: 0.5,
-    electric: 0.5,
-    ground: 0
+const GEN = Generations.get(9);
+
+/**
+ * @smogon/calc keys its type-effectiveness map by capitalized type name
+ * ("Grass", "Fire", ...), while our `ElementType` is lowercase. Cache the
+ * lowercase→multiplier lookup per attacking type so the full 18-type chart is
+ * sourced from calc (the project's single数值真理源) rather than hand-maintained.
+ */
+const CHART_CACHE = new Map<ElementType, Record<string, number>>();
+
+function chartFor(moveType: ElementType): Record<string, number> {
+  let row = CHART_CACHE.get(moveType);
+  if (!row) {
+    const calcType = GEN.types.get(toID(moveType));
+    row = {};
+    if (calcType?.effectiveness) {
+      for (const [defType, mult] of Object.entries(calcType.effectiveness)) {
+        row[defType.toLowerCase()] = mult as number;
+      }
+    }
+    CHART_CACHE.set(moveType, row);
   }
-};
+  return row;
+}
 
 export function typeEffectiveness(moveType: ElementType, targetTypes: ElementType[]): number {
-  return targetTypes.reduce((multiplier, targetType) => multiplier * (CHART[moveType]?.[targetType] ?? 1), 1);
+  const row = chartFor(moveType);
+  return targetTypes.reduce((multiplier, targetType) => multiplier * (row[targetType] ?? 1), 1);
 }

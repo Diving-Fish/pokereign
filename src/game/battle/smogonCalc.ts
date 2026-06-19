@@ -1,5 +1,6 @@
 import { Generations, Pokemon, Move, Field, calculate } from "@smogon/calc";
-import { SPECIES, type SpeciesId } from "../data/species";
+import { type SpeciesId } from "../data/species";
+import { speciesAbility } from "../data/pokedex";
 import { MOVES, type MoveId } from "../data/moves";
 import type { Stats } from "../data/types";
 import type { BattleFieldState, BattleMonster } from "./types";
@@ -66,13 +67,12 @@ export function computeStats(
   evs: Stats,
   nature: string
 ): { stats: Stats; maxHp: number } {
-  const species = SPECIES[speciesId];
   const mon = new Pokemon(GEN, speciesId, {
     level: calcLevel,
     nature,
     ivs,
     evs,
-    ability: species.ability
+    ability: speciesAbility(speciesId)
   });
   return {
     stats: {
@@ -88,13 +88,12 @@ export function computeStats(
 }
 
 function toPokemon(monster: BattleMonster): Pokemon {
-  const species = SPECIES[monster.speciesId];
   return new Pokemon(GEN, monster.speciesId, {
     level: monster.calcLevel,
     nature: monster.nature,
     ivs: monster.ivs,
     evs: monster.evs,
-    ability: species.ability,
+    ability: speciesAbility(monster.speciesId),
     boosts: {
       atk: monster.statStages.atk,
       def: monster.statStages.def,

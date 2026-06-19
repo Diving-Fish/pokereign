@@ -7,12 +7,13 @@ import { createMapRenderView, removeEncounterMarker, updateMapPathOverlay, updat
 import { fitRendererToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
 import { createTeamHud, type TeamHudView } from "./client/render/teamHud";
 import { createCaptureReplaceView, type CaptureReplaceView } from "./client/render/captureReplaceView";
+import { createMoveLearnView, type MoveLearnView } from "./client/render/moveLearnView";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
-import { applyLevelUps, createMonsterState, evolveIfReady, MAX_LEVEL, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating, type MonsterState } from "./game/state/monster";
+import { applyLearnset, applyLevelUps, createMonsterState, evolveIfReady, learnMoveIntoSlot, MAX_LEVEL, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating, type MonsterState, type PendingLearn } from "./game/state/monster";
 import { attemptCapture, isDirectlyCapturable, type CaptureResult } from "./game/state/capture";
 import { Rng } from "./game/state/rng";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
@@ -20,7 +21,7 @@ import { getAllAnimatedBattleSpriteUrls, getAllBattleSpriteUrls, getAnimatedBatt
 import { createAnimatedBattler, type AnimatedBattler } from "./client/render/animatedBattler";
 import { loadGif } from "./client/render/gifLoader";
 import "pixi.js/gif";
-import type { MoveId } from "./game/data/moves";
+import { MOVES, type MoveId } from "./game/data/moves";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
@@ -194,6 +195,14 @@ const captureReplaceView: CaptureReplaceView = createCaptureReplaceView({
 });
 uiLayer.addChild(captureReplaceView.overlay);
 
+// Move-learn modal, shown after battle when a level-up move can't auto-fit (4
+// slots full). Queued per-monster and drained one at a time.
+const moveLearnView: MoveLearnView = createMoveLearnView({
+  onReplace: (slot) => resolveMoveLearn(slot),
+  onSkip: () => resolveMoveLearnSkip()
+});
+uiLayer.addChild(moveLearnView.overlay);
+
 // 4 tiles/sec → 250 ms per tile. Movement is grid-locked: one tile per step,
 // no diagonals, with the on-screen position interpolated across the step so the
 // player and camera glide instead of snapping.
@@ -233,6 +242,9 @@ let activeFoeIsBoss = false;
 // A landed capture that needs a roster slot freed; resolved by the replace modal
 // once the battle playback has torn down and we are back on the map.
 let pendingCapturedMonster: MonsterState | null = null;
+// Level-up moves that couldn't auto-fit (4 slots full), awaiting the player's
+// replace/skip decision; drained one at a time after the battle tears down.
+const pendingLearns: PendingLearn[] = [];
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -394,8 +406,8 @@ function requestPathTo(tileX: number, tileY: number): void {
 }
 
 function updateMap(deltaMs: number): void {
-  // Freeze the overworld while the capture replace-or-release decision is open.
-  if (captureReplaceView.isOpen()) {
+  // Freeze the overworld while a post-battle decision modal is open.
+  if (captureReplaceView.isOpen() || moveLearnView.isOpen()) {
     movePath = [];
     return;
   }
@@ -645,6 +657,7 @@ function resolveCaptureReplace(index: number): void {
   captureReplaceView.close();
   teamHud.refresh();
   showTransientMessage(`${SPECIES[replaced.speciesId].name} 离队，${SPECIES[captured.speciesId].name} 加入了队伍！`);
+  openNextPostBattleModal();
 }
 
 /** Let the catch go and keep the team as it stands. */
@@ -655,6 +668,36 @@ function resolveCaptureRelease(): void {
   if (captured) {
     showTransientMessage(`放走了 ${SPECIES[captured.speciesId].name}。`);
   }
+  openNextPostBattleModal();
+}
+
+/** Teach the queued move into slot `index`, replacing what was there. */
+function resolveMoveLearn(index: number): void {
+  const learn = pendingLearns.shift();
+  moveLearnView.close();
+  if (learn) {
+    const monster = playerRoster.find((m) => m.instanceId === learn.instanceId);
+    if (monster) {
+      const forgotten = monster.moves[index];
+      if (learnMoveIntoSlot(monster, learn.moveId, index)) {
+        teamHud.refresh();
+        showTransientMessage(
+          `${SPECIES[monster.speciesId].name} 忘记了 ${MOVES[forgotten].name}，学会了 ${MOVES[learn.moveId].name}！`
+        );
+      }
+    }
+  }
+  openNextPostBattleModal();
+}
+
+/** Give up the queued move; the moveset stays as-is. */
+function resolveMoveLearnSkip(): void {
+  const learn = pendingLearns.shift();
+  moveLearnView.close();
+  if (learn) {
+    showTransientMessage(`放弃了学习 ${MOVES[learn.moveId].name}。`);
+  }
+  openNextPostBattleModal();
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -757,17 +800,32 @@ function grantBattleXp(): number {
   return reward;
 }
 
-/** Spend freshly-earned XP into level-ups, returning a message per level gained. */
+/**
+ * Spend freshly-earned XP into level-ups, returning a message per level gained.
+ * Also teaches level-up moves: ones that fit a free slot are learned inline
+ * (with a message); ones that don't are queued on `pendingLearns` for a
+ * post-battle replace/skip decision.
+ */
 function applyTeamLevelUps(): string[] {
   const messages: string[] = [];
   for (const monster of playerRoster) {
+    const fromLevel = monster.level;
     const result = applyLevelUps(monster);
-    if (result.leveledUp) {
-      messages.push(`${SPECIES[monster.speciesId].name} 升到了 Lv.${result.to}！`);
-      const evo = evolveIfReady(monster);
-      if (evo.evolved) {
-        messages.push(`咦……？${SPECIES[evo.fromSpeciesId].name} 进化成了 ${SPECIES[evo.toSpeciesId].name}！`);
-      }
+    if (!result.leveledUp) {
+      continue;
+    }
+    messages.push(`${SPECIES[monster.speciesId].name} 升到了 Lv.${result.to}！`);
+    const evo = evolveIfReady(monster);
+    if (evo.evolved) {
+      messages.push(`咦……？${SPECIES[evo.fromSpeciesId].name} 进化成了 ${SPECIES[evo.toSpeciesId].name}！`);
+    }
+    const { learned, pending } = applyLearnset(monster, fromLevel);
+    for (const moveId of learned) {
+      messages.push(`${SPECIES[monster.speciesId].name} 学会了 ${MOVES[moveId].name}！`);
+    }
+    for (const moveId of pending) {
+      pendingLearns.push({ instanceId: monster.instanceId, speciesId: monster.speciesId, moveId });
+      messages.push(`${SPECIES[monster.speciesId].name} 想学会 ${MOVES[moveId].name}，战斗后再决定。`);
     }
   }
   return messages;
@@ -960,11 +1018,33 @@ function finishBattlePlaybackIfNeeded(): void {
     // The roster's HP/level may have changed; repaint the team HUD slots.
     teamHud.refresh();
 
-    // A capture that landed on a full team now needs a slot decision; raise the
-    // replace modal over the map (it owns the roster mutation + HUD refresh).
-    if (pendingCapturedMonster) {
-      captureReplaceView.open(pendingCapturedMonster, playerRoster);
+    // Raise any post-battle decisions over the map (capture slot, then move
+    // learns), one at a time.
+    openNextPostBattleModal();
+  }
+}
+
+/**
+ * Drain the post-battle decision queue one modal at a time: first a full-team
+ * capture slot, then each queued move-learn. Each resolver calls back here when
+ * it closes, so the modals chain until the queue is empty and the map unfreezes.
+ */
+function openNextPostBattleModal(): void {
+  if (pendingCapturedMonster) {
+    captureReplaceView.open(pendingCapturedMonster, playerRoster);
+    return;
+  }
+  const next = pendingLearns[0];
+  if (next) {
+    const monster = playerRoster.find((m) => m.instanceId === next.instanceId);
+    // The monster may have left the team (e.g. replaced by a capture); drop the
+    // stale learn and move on.
+    if (!monster) {
+      pendingLearns.shift();
+      openNextPostBattleModal();
+      return;
     }
+    moveLearnView.open(monster, next.moveId);
   }
 }
 
@@ -1541,7 +1621,7 @@ function getSpriteRenderTuning(
 ): { x: number; y: number; scale: number; position: { x: number; y: number } } {
   const layoutSide = side === "player" ? "player" : "foe";
   const base = BATTLE_LAYOUT[layoutSide];
-  const tuning = SPECIES[speciesId].spriteAnchors?.[facing];
+  const tuning = (SPECIES[speciesId] as MonsterSpecies).spriteAnchors?.[facing];
   const position = getSpriteFootPosition(layoutSide, tuning?.footOffset);
   return {
     ...position,

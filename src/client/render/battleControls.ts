@@ -1,6 +1,6 @@
 import { Container, Graphics, Text, TextStyle } from "pixi.js";
 import { createButton, type Button } from "./button";
-import { adjustColor, categoryColor, hpColors, PALETTE, pixelText, typeColor } from "./theme";
+import { adjustColor, categoryColor, hpColors, PALETTE, pixelText, typeColor, typeLabel } from "./theme";
 import { moveMeta } from "../../game/battle/smogonCalc";
 import { MOVES } from "../../game/data/moves";
 import type { BattleStateView } from "../../game/battle/types";
@@ -19,17 +19,6 @@ const POKE_BTN_W = 241;
 const POKE_BTN_H = 36;
 const POKE_GAP = 10;
 const CAPTURE_BTN_W = 118;
-
-const TYPE_LABELS: Record<string, string> = {
-  normal: "一般",
-  fire: "火",
-  water: "水",
-  grass: "草",
-  electric: "电",
-  flying: "飞行",
-  rock: "岩石",
-  ground: "地面"
-};
 
 const styles = {
   moveName: new TextStyle(pixelText({ fill: PALETTE.btnInk, fontSize: 18, fontWeight: "700", shadow: true })),
@@ -216,7 +205,7 @@ function updateMoveButtons(buttons: MoveButton[], view: BattleStateView, forceSw
     entry.name.text = MOVES[moveId].name;
 
     // Type pill sized to its label.
-    const label = TYPE_LABELS[meta.type] ?? meta.type;
+    const label = typeLabel(meta.type);
     entry.pillLabel.text = label;
     const pillWidth = entry.pillLabel.width + 12;
     entry.pill.clear();

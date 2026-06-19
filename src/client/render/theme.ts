@@ -58,20 +58,56 @@ export const PALETTE = {
   btnDisabledInk: "#8a8270"
 } as const;
 
-/** Per-element accent colors for move buttons and type pills. */
+/** Per-element accent colors for move buttons and type pills (all 18 types). */
 export const TYPE_COLORS: Record<string, string> = {
   normal: "#b8b393",
   fire: "#f1683b",
   water: "#4f9fe8",
   grass: "#5fb44e",
   electric: "#f4cd44",
+  ice: "#8fd6d1",
+  fighting: "#cf4063",
+  poison: "#a35bc0",
+  ground: "#dcb45a",
   flying: "#9bb6e8",
+  psychic: "#f1577f",
+  bug: "#a9b740",
   rock: "#c1a460",
-  ground: "#dcb45a"
+  ghost: "#6e5aa0",
+  dragon: "#6a52e8",
+  dark: "#5a5060",
+  steel: "#8fa4b4",
+  fairy: "#ec9bd0"
 };
 
 export function typeColor(type: string): string {
   return TYPE_COLORS[type] ?? "#cccccc";
+}
+
+/** Localized (zh) element-type labels for pills (all 18 types). */
+export const TYPE_LABELS: Record<string, string> = {
+  normal: "一般",
+  fire: "火",
+  water: "水",
+  grass: "草",
+  electric: "电",
+  ice: "冰",
+  fighting: "格斗",
+  poison: "毒",
+  ground: "地面",
+  flying: "飞行",
+  psychic: "超能",
+  bug: "虫",
+  rock: "岩石",
+  ghost: "幽灵",
+  dragon: "龙",
+  dark: "恶",
+  steel: "钢",
+  fairy: "妖精"
+};
+
+export function typeLabel(type: string): string {
+  return TYPE_LABELS[type] ?? type;
 }
 
 /** Damage-category accent colors (physical / special / status). */
