@@ -1,12 +1,16 @@
 import { Assets, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
 import { GAME_HEIGHT, GAME_WIDTH } from "./screen";
-import { adjustColor, PALETTE, pixelText, typeColor } from "./theme";
+import { adjustColor, hpColors, PALETTE, pixelText, typeColor } from "./theme";
 import { getBattleSpriteUrl } from "../../game/data/art";
 import { MOVES } from "../../game/data/moves";
 import { SPECIES } from "../../game/data/species";
 import { computeStats, moveMeta, toCalcLevel } from "../../game/battle/smogonCalc";
-import type { MonsterState } from "../../game/state/monster";
+import { MAX_LEVEL, xpToNextLevel, type MonsterState } from "../../game/state/monster";
 import type { Stats } from "../../game/data/types";
+
+// XP bar accent (a cool blue, distinct from the green/amber/red HP scale).
+const XP_HI = "#6cc6ee";
+const XP_LO = "#2f6fb0";
 
 // Bottom-right "main info" bar geometry.
 const SQUARE = 56;
@@ -19,7 +23,7 @@ const BAR_H = PAD * 2 + SQUARE;
 
 // Detail window geometry.
 const DETAIL_W = 700;
-const DETAIL_H = 440;
+const DETAIL_H = 492;
 const DETAIL_X = Math.round((GAME_WIDTH - DETAIL_W) / 2);
 const DETAIL_Y = Math.round((GAME_HEIGHT - DETAIL_H) / 2);
 
@@ -82,7 +86,8 @@ const styles = {
   moveName: new TextStyle(pixelText({ fill: PALETTE.ink, fontSize: 14, fontWeight: "700" })),
   pp: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 12, fontWeight: "700" })),
   pill: new TextStyle(pixelText({ fill: "#1c1622", fontSize: 11, fontWeight: "700" })),
-  close: new TextStyle(pixelText({ fill: PALETTE.ink, fontSize: 18, fontWeight: "700" })),
+  barLabel: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 14, fontWeight: "700" })),
+  barValue: new TextStyle(pixelText({ fill: PALETTE.ink, fontSize: 13, fontWeight: "700" })),
   slotEmpty: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 11, fontWeight: "700" })),
   itemHint: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 10, fontWeight: "700" }))
 };
@@ -352,19 +357,33 @@ function createCloseButton(onTap: () => void): Container {
   container.eventMode = "static";
   container.cursor = "pointer";
 
+  const SIZE = 30;
+  const cx = SIZE / 2;
+
   const bg = new Graphics();
-  bg.roundRect(0, 0, 30, 30, 8).fill(PALETTE.panelEdgeDark);
-  bg.roundRect(2, 2, 26, 26, 7).fill(PALETTE.panelBack);
-  bg.roundRect(2, 2, 26, 26, 7).stroke({ color: PALETTE.gold, width: 1.5, alpha: 0.7 });
+  const paintBg = (border: number, alpha: number) => {
+    bg.clear();
+    bg.roundRect(0, 0, SIZE, SIZE, 8).fill(PALETTE.panelEdgeDark);
+    bg.roundRect(2, 2, SIZE - 4, SIZE - 4, 7).fill(PALETTE.panelBack);
+    bg.roundRect(2, 2, SIZE - 4, SIZE - 4, 7).stroke({ color: PALETTE.gold, width: border, alpha });
+  };
+  paintBg(1.5, 0.7);
   container.addChild(bg);
 
-  const label = new Text({ text: "✕", style: styles.close });
-  label.anchor.set(0.5);
-  label.x = 15;
-  label.y = 14;
-  container.addChild(label);
+  // Draw the cross as geometry so it sits dead-center regardless of font metrics.
+  const arm = 6;
+  const mark = new Graphics();
+  mark
+    .moveTo(cx - arm, cx - arm)
+    .lineTo(cx + arm, cx + arm)
+    .moveTo(cx + arm, cx - arm)
+    .lineTo(cx - arm, cx + arm)
+    .stroke({ color: PALETTE.ink, width: 2.5, cap: "round" });
+  container.addChild(mark);
 
   container.on("pointertap", onTap);
+  container.on("pointerover", () => paintBg(2, 1));
+  container.on("pointerout", () => paintBg(1.5, 0.7));
   return container;
 }
 
@@ -415,9 +434,31 @@ function buildDetailContent(content: Container, monster: MonsterState): void {
   }
 
   // Nature + held item.
-  addLabelValue(content, 28, 256, "性格", natureLabel(monster.nature));
-  addLabelValue(content, 28, 284, "携带", monster.heldItem ?? "无");
-  addLabelValue(content, 28, 312, "体力", `${Math.max(0, monster.currentHp)} / ${maxHp}`);
+  addLabelValue(content, 28, 252, "性格", natureLabel(monster.nature));
+  addLabelValue(content, 28, 278, "携带", monster.heldItem ?? "无");
+
+  // HP + XP as bars spanning the left column.
+  const barW = 156;
+  const hp = Math.max(0, monster.currentHp);
+  const hpRatio = maxHp > 0 ? hp / maxHp : 0;
+  const { hi: hpHi, lo: hpLo } = hpColors(hpRatio);
+  drawStatBar(content, 28, 306, barW, "体力", `${hp} / ${maxHp}`, hpRatio, hpHi, hpLo);
+
+  const atMaxLevel = monster.level >= MAX_LEVEL;
+  const xpNeed = xpToNextLevel(monster.level);
+  const xpRatio = atMaxLevel ? 1 : xpNeed > 0 ? monster.xp / xpNeed : 0;
+  const xpValue = atMaxLevel ? "MAX" : `${monster.xp} / ${xpNeed}`;
+  drawStatBar(
+    content,
+    28,
+    344,
+    barW,
+    "经验",
+    xpValue,
+    xpRatio,
+    atMaxLevel ? PALETTE.gold : XP_HI,
+    atMaxLevel ? adjustColor(PALETTE.gold, -0.3) : XP_LO
+  );
 
   // Stats table.
   const tableX = 200;
@@ -451,17 +492,59 @@ function buildDetailContent(content: Container, monster: MonsterState): void {
   // Moves.
   const movesTitle = new Text({ text: "招式", style: styles.section });
   movesTitle.x = 28;
-  movesTitle.y = 344;
+  movesTitle.y = 390;
   content.addChild(movesTitle);
 
   const cellW = 156;
   const cellH = 64;
   const cellGap = 8;
+  const cellY = 414;
   for (let i = 0; i < 4; i += 1) {
     const cellX = 28 + i * (cellW + cellGap);
-    const cellY = 372;
     const moveId = monster.moves[i];
     drawMoveCell(content, cellX, cellY, cellW, cellH, moveId);
+  }
+}
+
+/**
+ * Horizontal stat bar: label on the left, value on the right, a rounded track
+ * underneath with a two-tone fill (matching the battle HP bar treatment).
+ */
+function drawStatBar(
+  content: Container,
+  x: number,
+  y: number,
+  w: number,
+  label: string,
+  value: string,
+  ratio: number,
+  hi: string,
+  lo: string
+): void {
+  const labelText = new Text({ text: label, style: styles.barLabel });
+  labelText.x = x;
+  labelText.y = y;
+  content.addChild(labelText);
+
+  const valueText = new Text({ text: value, style: styles.barValue });
+  valueText.anchor.set(1, 0);
+  valueText.x = x + w;
+  valueText.y = y + 1;
+  content.addChild(valueText);
+
+  const barY = y + 18;
+  const barH = 8;
+  const track = new Graphics();
+  track.roundRect(x, barY, w, barH, barH / 2).fill(PALETTE.hpTrack);
+  track.roundRect(x, barY, w, barH, barH / 2).stroke({ color: PALETTE.panelEdgeDark, width: 1, alpha: 0.6 });
+  content.addChild(track);
+
+  const fillW = Math.max(0, Math.min(1, ratio)) * w;
+  if (fillW > 1) {
+    const fill = new Graphics();
+    fill.roundRect(x, barY, fillW, barH, barH / 2).fill(lo);
+    fill.roundRect(x, barY, fillW, barH * 0.5, barH / 2).fill(hi);
+    content.addChild(fill);
   }
 }
 
