@@ -1,6 +1,7 @@
 import { Generations, Pokemon, Move, Field, calculate } from "@smogon/calc";
 import { type SpeciesId } from "../data/species";
 import { speciesAbility } from "../data/pokedex";
+import { itemCalcName } from "../data/items";
 import { MOVES, type MoveId } from "../data/moves";
 import type { Stats } from "../data/types";
 import type { BattleFieldState, BattleMonster } from "./types";
@@ -102,7 +103,8 @@ function toPokemon(monster: BattleMonster): Pokemon {
       spe: monster.statStages.spe
     },
     status: monster.status ?? "",
-    curHP: monster.currentHp
+    curHP: monster.currentHp,
+    item: itemCalcName(monster.heldItem)
   });
 }
 

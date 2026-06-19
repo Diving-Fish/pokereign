@@ -5,6 +5,7 @@ import { getBattleSpriteUrl } from "../../game/data/art";
 import { MOVES } from "../../game/data/moves";
 import { SPECIES } from "../../game/data/species";
 import { speciesTypes } from "../../game/data/pokedex";
+import { itemName } from "../../game/data/items";
 import { computeStats, moveMeta, toCalcLevel } from "../../game/battle/smogonCalc";
 import { MAX_LEVEL, xpToNextLevel, type MonsterState } from "../../game/state/monster";
 import type { Stats } from "../../game/data/types";
@@ -676,7 +677,7 @@ function buildDetailContent(content: Container, monster: MonsterState): Containe
 
   // Nature + held item.
   addLabelValue(content, 28, 252, "性格", natureLabel(monster.nature));
-  addLabelValue(content, 28, 278, "携带", monster.heldItem ?? "无");
+  addLabelValue(content, 28, 278, "携带", itemName(monster.heldItem));
 
   // HP + XP as bars spanning the left column.
   const barW = 156;

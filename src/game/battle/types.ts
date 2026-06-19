@@ -32,6 +32,8 @@ export type BattleMonster = {
   maxHp: number;
   currentHp: number;
   stats: Stats;
+  /** Held item id (see data/items.ts); its calc item drives battle effects. */
+  heldItem?: string;
   moves: MoveId[];
   statStages: {
     atk: number;

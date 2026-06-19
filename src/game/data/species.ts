@@ -19,15 +19,16 @@ const evoLv = (targetSpeciesId: string, requiredLevel: number): EvolutionRule =>
 /** Item-triggered evolution (waits on the item system). */
 const evoItem = (targetSpeciesId: string, requiredItem: string): EvolutionRule => ({ targetSpeciesId, requiredItem });
 
-// Evolution item names (zh) — used as `requiredItem` placeholders.
-const FIRE_STONE = "火之石";
-const WATER_STONE = "水之石";
-const THUNDER_STONE = "雷之石";
-const LEAF_STONE = "叶之石";
-const MOON_STONE = "月之石";
-const LINKING_CORD = "连接绳";
-const METAL_COAT = "金属外膜";
-const SHARP_CLAW = "锐利之爪";
+// Evolution item ids — match `ITEMS` (data/items.ts) by id; `useItemOnMonster`
+// triggers the evolution when the matching item is used.
+const FIRE_STONE = "fireStone";
+const WATER_STONE = "waterStone";
+const THUNDER_STONE = "thunderStone";
+const LEAF_STONE = "leafStone";
+const MOON_STONE = "moonStone";
+const LINKING_CORD = "linkingCord";
+const METAL_COAT = "metalCoat";
+const SHARP_CLAW = "sharpClaw";
 
 export const SPECIES = {
   // ===== 御三家 =====

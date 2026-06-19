@@ -75,12 +75,17 @@ works on desktop today and a future PC/mobile build with no input rewrite.
     `/pokemon-sprites/ani/{slug}.gif` (front) + `/pokemon-sprites/ani-back/{slug}.gif`
     (back). Variable-size, near-native resolution (relative body size baked in).
   - Static **gen5** PNGs (`/pokemon-sprites/gen5{,-back}/{slug}.png`, fixed 96×96)
-    are the error/preload fallback and still power the team HUD.
+    are the on-failure fallback (loaded lazily via `Texture.from` when a battler
+    mounts) and still power the team HUD.
 - Animated sprites (`src/client/render/animatedBattler.ts`): one `GifSprite`
   (`pixi.js/gif`) per battler, lazy-loaded and swapped in over the static PNG
   fallback. The fallback stays hidden and is only revealed if a GIF genuinely
-  fails — and all GIFs are preloaded at startup, so a cached `GifSource` attaches
-  synchronously and the low-res still never flashes in at battle start.
+  fails. GIFs are decoded **lazily, on first use** — when a battler's `GifSource`
+  isn't cached, `animatedBattler` calls `loadGif` and the intro fade covers the
+  decode. (Earlier the whole roster's GIFs were preloaded at startup so cached
+  sources attached synchronously; with 93 species that decode-stalled startup one
+  frame per GIF, so the preload was removed. A streaming / decode-on-demand pass is
+  planned. Cached sources still attach synchronously on subsequent battles.)
 - **GIF flicker fix** (`src/client/render/gifLoader.ts`): `pixi.js/gif`'s built-in
   decoder clears the WHOLE canvas on disposal method 2, but Showdown's ani frames
   are "first frame full + later frames sub-rect patches + interspersed disposal-1
@@ -303,6 +308,31 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
   species — wiring the new roster into biome-based encounters is Phase 3 (生态群落).
   Until then the new species are reachable via the dev GM hook
   (`window.gmStartBattle("dratini", 5)`).
+
+### Item System — Slice 2a (data model + effects)
+
+- `src/game/data/items.ts` — item registry (`ITEMS`, `ItemId`). Kinds: `held`,
+  `stone`, `tm`, `medicine`, `berry`. First catalog: 17 type-boost held items + 8
+  signature held items (Life Orb, Choice trio, Leftovers, Assault Vest, Eviolite,
+  Shell Bell), 8 evolution stones/items, 8 TMs, 7 medicines, 2 berries.
+- **Held items hit battle for free via `@smogon/calc`**: `MonsterState.heldItem`
+  stores an item id; `toBattleMonster` copies it to `BattleMonster.heldItem`;
+  `smogonCalc.toPokemon` passes `itemCalcName(id)` as the calc `item`. Verified
+  Charcoal/Life Orb/Choice Band etc. all change calc damage.
+- `src/game/state/items.ts` — `useItemOnMonster(state, itemId)` mutates a monster:
+  - `stone` → evolves if a `requiredItem` evolution matches (unblocks the stone
+    lines from Slice 3b: pikachu+雷之石→raichu, eevee forks, gengar via 连接绳…).
+  - `tm` → learns the move into a free slot, or returns `learnChoice` so the caller
+    opens `moveLearnView` (reusing the level-up replace flow) and resolves with
+    `teachTmIntoSlot`.
+  - `medicine`/`berry` → heal / full-heal / revive (with the right fail cases).
+  - `equipHeldItem` / `unequipHeldItem` for the holder slot.
+- Shared `evolveTo(state, targetSpeciesId)` + `maxHpOf(state)` extracted in
+  `monster.ts` (level-up and item evolution share the HP-rescale).
+- Dev hooks (DEV only): `gmEquip(slot, itemId)`, `gmUseItem(slot, itemId)`.
+- NOT yet: inventory / single backpack slot, the pickup-decision modal
+  (立即用/携带/进背包/分解), an in-game bag UI, item reward sources, berry held
+  auto-trigger, rare-candy level use, and disassembly — all Slice 2b/2c.
 
 ### Battle System
 

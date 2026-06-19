@@ -118,6 +118,7 @@ export function toBattleMonster(state: MonsterState, side: BattleSide): BattleMo
     maxHp,
     currentHp: Math.min(state.currentHp, maxHp),
     stats,
+    heldItem: state.heldItem,
     moves: state.moves,
     statStages: { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0 }
   };
@@ -139,8 +140,23 @@ export function xpToNextLevel(level: number): number {
   return level * 12 + 8;
 }
 
-function maxHpAt(state: MonsterState): number {
+/** Current max HP derived from the monster's species + level + IV/EV/nature. */
+export function maxHpOf(state: MonsterState): number {
   return computeStats(state.speciesId, toCalcLevel(state.level), state.ivs, state.evs, state.nature).maxHp;
+}
+
+/**
+ * Switch `state` to a new species, adding exactly the max-HP gained to current HP
+ * (like the original games — evolving partially heals). Shared by level-up and
+ * item evolution. Moves are kept; a fainted monster keeps its 0 HP.
+ */
+export function evolveTo(state: MonsterState, targetSpeciesId: SpeciesId): void {
+  const maxHpBefore = maxHpOf(state);
+  state.speciesId = targetSpeciesId;
+  const maxHpAfter = maxHpOf(state);
+  if (state.currentHp > 0) {
+    state.currentHp = Math.min(maxHpAfter, state.currentHp + (maxHpAfter - maxHpBefore));
+  }
 }
 
 export type LevelUpResult = {
@@ -164,7 +180,7 @@ export function applyLevelUps(state: MonsterState): LevelUpResult {
     return { leveledUp: false, from, to: from };
   }
 
-  const maxHpBefore = maxHpAt(state);
+  const maxHpBefore = maxHpOf(state);
   while (state.level < MAX_LEVEL && state.xp >= xpToNextLevel(state.level)) {
     state.xp -= xpToNextLevel(state.level);
     state.level += 1;
@@ -172,7 +188,7 @@ export function applyLevelUps(state: MonsterState): LevelUpResult {
 
   const to = state.level;
   if (to > from && state.currentHp > 0) {
-    const maxHpAfter = maxHpAt(state);
+    const maxHpAfter = maxHpOf(state);
     state.currentHp = Math.min(maxHpAfter, state.currentHp + (maxHpAfter - maxHpBefore));
   }
   return { leveledUp: to > from, from, to };
@@ -209,10 +225,7 @@ export function evolveIfReady(state: MonsterState): EvolutionResult {
       (evo) => evo.requiredLevel !== undefined && state.level >= evo.requiredLevel
     );
     if (!rule) break;
-    const maxHpBefore = maxHpAt(state);
-    state.speciesId = rule.targetSpeciesId as SpeciesId;
-    const maxHpAfter = maxHpAt(state);
-    state.currentHp = Math.min(maxHpAfter, state.currentHp + (maxHpAfter - maxHpBefore));
+    evolveTo(state, rule.targetSpeciesId as SpeciesId);
     evolved = true;
   }
 

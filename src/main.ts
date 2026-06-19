@@ -1,4 +1,4 @@
-import { Application, Assets, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
+import { Application, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
 import "./styles.css";
 import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBackgroundView } from "./client/render/battleBackground";
 import { createBattleControls, type BattleControlsView } from "./client/render/battleControls";
@@ -17,11 +17,12 @@ import { applyLearnset, applyLevelUps, createMonsterState, evolveIfReady, learnM
 import { attemptCapture, isDirectlyCapturable, type CaptureResult } from "./game/state/capture";
 import { Rng } from "./game/state/rng";
 import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
-import { getAllAnimatedBattleSpriteUrls, getAllBattleSpriteUrls, getAnimatedBattleSpriteUrl, getBattleSpriteUrl } from "./game/data/art";
+import { getAnimatedBattleSpriteUrl, getBattleSpriteUrl } from "./game/data/art";
 import { createAnimatedBattler, type AnimatedBattler } from "./client/render/animatedBattler";
-import { loadGif } from "./client/render/gifLoader";
 import "pixi.js/gif";
 import { MOVES, type MoveId } from "./game/data/moves";
+import { ITEMS, type ItemId } from "./game/data/items";
+import { equipHeldItem, useItemOnMonster } from "./game/state/items";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
@@ -125,15 +126,12 @@ if (import.meta.env.DEV) {
   };
 }
 
-// Preload the animated GIFs (via our flicker-fixed decoder) and the static PNGs
-// (error fallback) up front, so that by the time a battle starts the GifSource
-// is cached and attaches synchronously — no Gen5 still ever flashes in.
-void Assets.load(getAllBattleSpriteUrls()).catch((error: unknown) => {
-  console.warn("Failed to preload static battle sprites.", error);
-});
-for (const url of getAllAnimatedBattleSpriteUrls()) {
-  void loadGif(url).catch((error: unknown) => console.warn(`Failed to preload ${url}`, error));
-}
+// Battle sprites are loaded lazily, on first use: animated GIFs decode when
+// `animatedBattler` first shows them (the intro fade covers it), and the static
+// PNG fallback loads via `Texture.from` when a battler mounts. With 93 species,
+// preloading every front/back asset up front stalled startup (GIF decode is one
+// frame each), so nothing sprite-related is preloaded now. (A streaming /
+// decode-on-demand pass is planned.)
 void document.fonts?.load('16px "Zpix"').catch(() => undefined);
 
 const tileTextures: TileTextureMap = createTileTextures(app, activeMap.tileSize);
@@ -202,6 +200,36 @@ const moveLearnView: MoveLearnView = createMoveLearnView({
   onSkip: () => resolveMoveLearnSkip()
 });
 uiLayer.addChild(moveLearnView.overlay);
+
+// Dev-only GM hooks for the item system (no inventory UI yet): equip a held item
+// or use a stone/TM/medicine on a roster slot straight from the console, e.g.
+// `gmEquip(0, "charcoal")`, `gmUseItem(0, "thunderStone")`. Stripped in prod.
+if (import.meta.env.DEV) {
+  type ItemWindow = typeof window & {
+    gmEquip?: (slot: number, itemId: ItemId) => void;
+    gmUseItem?: (slot: number, itemId: ItemId) => void;
+  };
+  (window as ItemWindow).gmEquip = (slot, itemId) => {
+    const mon = playerRoster[slot];
+    if (!mon || !ITEMS[itemId]) {
+      console.warn(`gmEquip: bad slot/item. Items: ${Object.keys(ITEMS).join(", ")}`);
+      return;
+    }
+    equipHeldItem(mon, itemId);
+    teamHud.refresh();
+    console.log(`${SPECIES[mon.speciesId].name} 装备了 ${ITEMS[itemId].name}`);
+  };
+  (window as ItemWindow).gmUseItem = (slot, itemId) => {
+    const mon = playerRoster[slot];
+    if (!mon || !ITEMS[itemId]) {
+      console.warn(`gmUseItem: bad slot/item. Items: ${Object.keys(ITEMS).join(", ")}`);
+      return;
+    }
+    const result = useItemOnMonster(mon, itemId);
+    teamHud.refresh();
+    console.log("gmUseItem:", result);
+  };
+}
 
 // 4 tiles/sec → 250 ms per tile. Movement is grid-locked: one tile per step,
 // no diagonals, with the on-screen position interpolated across the step so the
