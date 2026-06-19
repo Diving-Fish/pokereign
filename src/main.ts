@@ -1,4 +1,4 @@
-import { Application, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
+import { Application, Assets, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
 import "./styles.css";
 import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBackgroundView } from "./client/render/battleBackground";
 import { createBattleControls, type BattleControlsView } from "./client/render/battleControls";
@@ -16,13 +16,13 @@ import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, Battle
 import { applyLearnset, applyLevelUps, createMonsterState, evolveIfReady, learnMoveIntoSlot, MAX_LEVEL, syncMonsterStateFromBattle, toBattleMonster, xpRewardForDefeating, type MonsterState, type PendingLearn } from "./game/state/monster";
 import { attemptCapture, isDirectlyCapturable, type CaptureResult } from "./game/state/capture";
 import { Rng } from "./game/state/rng";
-import { createRunState, isEncounterCleared, markEncounterCleared } from "./game/state/runState";
+import { createRunState, isBackpackFull, isEncounterCleared, markEncounterCleared, stashInBackpack, takeFromBackpack } from "./game/state/runState";
 import { getAnimatedBattleSpriteUrl, getBattleSpriteUrl } from "./game/data/art";
 import { createAnimatedBattler, type AnimatedBattler } from "./client/render/animatedBattler";
 import "pixi.js/gif";
 import { MOVES, type MoveId } from "./game/data/moves";
 import { ITEMS, type ItemId } from "./game/data/items";
-import { equipHeldItem, useItemOnMonster } from "./game/state/items";
+import { canUseItemOnMonster, equipHeldItem, teachTmIntoSlot, unequipHeldItem, useItemOnMonster } from "./game/state/items";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
@@ -183,8 +183,17 @@ sceneLayer.addChild(mapRender.container, battleRender.container);
 // monster detail modal are unaffected by battle screen shake and always on top.
 const uiLayer = new Container();
 root.addChild(uiLayer);
-const teamHud: TeamHudView = createTeamHud(runState.player.team);
-uiLayer.addChild(teamHud.bar, teamHud.overlay);
+const teamHud: TeamHudView = createTeamHud(runState.player.team, {
+  getBackpackItemId: () => runState.player.backpack as ItemId | undefined,
+  canUseBackpackItemOn: (index) => {
+    const itemId = runState.player.backpack as ItemId | undefined;
+    const mon = playerRoster[index];
+    return Boolean(itemId && mon && canUseItemOnMonster(mon, itemId));
+  },
+  onApplyBackpackItem: (index, action) => applyBackpackItem(index, action),
+  onUnequipHeldItem: (index) => unequipBackpackItem(index)
+});
+uiLayer.addChild(teamHud.bar, teamHud.overlay, teamHud.actionMenu);
 
 // Roster-replace modal, shown when a capture lands on a full team.
 const captureReplaceView: CaptureReplaceView = createCaptureReplaceView({
@@ -208,6 +217,7 @@ if (import.meta.env.DEV) {
   type ItemWindow = typeof window & {
     gmEquip?: (slot: number, itemId: ItemId) => void;
     gmUseItem?: (slot: number, itemId: ItemId) => void;
+    gmStash?: (itemId: ItemId) => void;
   };
   (window as ItemWindow).gmEquip = (slot, itemId) => {
     const mon = playerRoster[slot];
@@ -228,6 +238,15 @@ if (import.meta.env.DEV) {
     const result = useItemOnMonster(mon, itemId);
     teamHud.refresh();
     console.log("gmUseItem:", result);
+  };
+  (window as ItemWindow).gmStash = (itemId) => {
+    if (!ITEMS[itemId]) {
+      console.warn(`gmStash: unknown item. Items: ${Object.keys(ITEMS).join(", ")}`);
+      return;
+    }
+    runState.player.backpack = itemId;
+    teamHud.refresh();
+    console.log(`背包放入了 ${ITEMS[itemId].name}（拖到宝可梦身上使用/携带）`);
   };
 }
 
@@ -273,6 +292,10 @@ let pendingCapturedMonster: MonsterState | null = null;
 // Level-up moves that couldn't auto-fit (4 slots full), awaiting the player's
 // replace/skip decision; drained one at a time after the battle tears down.
 const pendingLearns: PendingLearn[] = [];
+// A TM dragged from the backpack onto a full-moveset monster: the move-learn
+// modal is open for it (on the map, not post-battle). Resolving it teaches the
+// move and consumes the backpack item; skipping leaves the item stashed.
+let bagTmLearn: { instanceId: string; moveId: MoveId } | null = null;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -435,7 +458,7 @@ function requestPathTo(tileX: number, tileY: number): void {
 
 function updateMap(deltaMs: number): void {
   // Freeze the overworld while a post-battle decision modal is open.
-  if (captureReplaceView.isOpen() || moveLearnView.isOpen()) {
+  if (captureReplaceView.isOpen() || moveLearnView.isOpen() || teamHud.isItemMenuOpen()) {
     movePath = [];
     return;
   }
@@ -701,6 +724,23 @@ function resolveCaptureRelease(): void {
 
 /** Teach the queued move into slot `index`, replacing what was there. */
 function resolveMoveLearn(index: number): void {
+  if (bagTmLearn) {
+    const tm = bagTmLearn;
+    bagTmLearn = null;
+    moveLearnView.close();
+    const monster = playerRoster.find((m) => m.instanceId === tm.instanceId);
+    if (monster) {
+      const forgotten = monster.moves[index];
+      if (teachTmIntoSlot(monster, tm.moveId, index)) {
+        takeFromBackpack(runState);
+        teamHud.refresh();
+        showTransientMessage(
+          `${SPECIES[monster.speciesId].name} 忘记了 ${MOVES[forgotten].name}，学会了 ${MOVES[tm.moveId].name}！`
+        );
+      }
+    }
+    return;
+  }
   const learn = pendingLearns.shift();
   moveLearnView.close();
   if (learn) {
@@ -720,12 +760,101 @@ function resolveMoveLearn(index: number): void {
 
 /** Give up the queued move; the moveset stays as-is. */
 function resolveMoveLearnSkip(): void {
+  if (bagTmLearn) {
+    const tm = bagTmLearn;
+    bagTmLearn = null;
+    moveLearnView.close();
+    showTransientMessage(`放弃了学习 ${MOVES[tm.moveId].name}。`);
+    return;
+  }
   const learn = pendingLearns.shift();
   moveLearnView.close();
   if (learn) {
     showTransientMessage(`放弃了学习 ${MOVES[learn.moveId].name}。`);
   }
   openNextPostBattleModal();
+}
+
+/**
+ * The player dropped the single backpack item on roster slot `index` and chose
+ * to 使用 (use) or 携带 (equip) it. Routes through the item-system logic, consumes
+ * the backpack slot on success, and chains the TM move-learn modal when a TM's
+ * four slots are full.
+ */
+function applyBackpackItem(index: number, action: "use" | "equip"): void {
+  const itemId = runState.player.backpack as ItemId | undefined;
+  const mon = playerRoster[index];
+  if (!itemId || !mon) {
+    return;
+  }
+
+  if (action === "equip") {
+    // Swap the backpack item with whatever the monster was holding (the old
+    // held item lands back in the now-free backpack slot).
+    const prev = equipHeldItem(mon, itemId);
+    takeFromBackpack(runState);
+    if (prev) {
+      stashInBackpack(runState, prev);
+    }
+    teamHud.refresh();
+    showTransientMessage(
+      prev
+        ? `${SPECIES[mon.speciesId].name} 改为携带 ${ITEMS[itemId].name}。`
+        : `${SPECIES[mon.speciesId].name} 携带了 ${ITEMS[itemId].name}。`
+    );
+    return;
+  }
+
+  const result = useItemOnMonster(mon, itemId);
+  if (!result.ok) {
+    showTransientMessage(result.reason);
+    return;
+  }
+
+  if (result.consumed) {
+    takeFromBackpack(runState);
+  }
+  teamHud.refresh();
+
+  switch (result.kind) {
+    case "evolved":
+      showTransientMessage(
+        `${SPECIES[result.fromSpeciesId].name} 进化成了 ${SPECIES[result.toSpeciesId].name}！`
+      );
+      break;
+    case "learned":
+      showTransientMessage(`${SPECIES[mon.speciesId].name} 学会了 ${MOVES[result.moveId].name}！`);
+      break;
+    case "learnChoice":
+      // Four slots full — open the replace modal; the item is consumed only if
+      // the player actually learns it (handled in resolveMoveLearn).
+      bagTmLearn = { instanceId: mon.instanceId, moveId: result.moveId };
+      moveLearnView.open(mon, result.moveId);
+      break;
+    case "healed":
+      showTransientMessage(`${SPECIES[mon.speciesId].name} 回复了 ${result.amount} 点体力。`);
+      break;
+    case "revived":
+      showTransientMessage(`${SPECIES[mon.speciesId].name} 恢复了精神！`);
+      break;
+  }
+}
+
+/**
+ * The player dragged roster slot `index` onto the empty backpack slot to take
+ * its held item off. The freed item lands in the (guaranteed-empty) backpack.
+ */
+function unequipBackpackItem(index: number): void {
+  const mon = playerRoster[index];
+  if (!mon || !mon.heldItem || isBackpackFull(runState)) {
+    return;
+  }
+  const removed = unequipHeldItem(mon);
+  if (removed) {
+    stashInBackpack(runState, removed);
+    teamHud.refresh();
+    showTransientMessage(`取下了 ${SPECIES[mon.speciesId].name} 携带的 ${ITEMS[removed as ItemId].name}。`);
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -1291,6 +1420,28 @@ function updateBattleRender(): void {
 const ANI_SPRITE_SCALE = { front: 1.7, back: 2.0 } as const;
 const ANI_FOOT_NUDGE = { front: 0, back: 0 } as const;
 
+// The static PNG fallback streams through the Showdown proxy and may not be in
+// the texture cache yet, so resolving it via `Texture.from` (sync, cache-only)
+// logs a Pixi "not found in Cache" warning every frame. Load through
+// `Assets.load` instead (cache hit is immediate once decoded) and only request
+// when the URL actually changes, then assign on resolve.
+const fallbackSpriteUrl = new WeakMap<Sprite, string>();
+
+function setFallbackTexture(sprite: Sprite, url: string): void {
+  if (fallbackSpriteUrl.get(sprite) === url) {
+    return;
+  }
+  fallbackSpriteUrl.set(sprite, url);
+  void Assets.load<Texture>(url)
+    .then((texture) => {
+      // Guard against a species switch that happened while loading.
+      if (fallbackSpriteUrl.get(sprite) === url) {
+        sprite.texture = texture;
+      }
+    })
+    .catch(() => undefined);
+}
+
 function updateBattleSprite(
   shadow: Graphics,
   battler: AnimatedBattler,
@@ -1312,7 +1463,7 @@ function updateBattleSprite(
   // if the GIF errors), then request the animated version — a no-op once it is
   // already on screen. Texture order before request() avoids a stale frame on
   // a species switch.
-  fallback.texture = Texture.from(getBattleSpriteUrl(speciesId, facing));
+  setFallbackTexture(fallback, getBattleSpriteUrl(speciesId, facing));
   battler.request(getAnimatedBattleSpriteUrl(speciesId, facing));
 
   const node = battler.active();

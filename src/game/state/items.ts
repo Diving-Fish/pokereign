@@ -82,6 +82,39 @@ export function useItemOnMonster(state: MonsterState, itemId: ItemId): ItemUseRe
   return { ok: false, consumed: false, reason: "现在没办法这样使用它。" };
 }
 
+/**
+ * Non-mutating check: would {@link useItemOnMonster} succeed on this monster
+ * right now? Mirrors the success conditions there. Held items (type boosters,
+ * signature items) are never "used" — they are equipped — so they return false.
+ * The UI uses this to decide whether to offer a 使用 / 携带 choice or default to
+ * just equipping.
+ */
+export function canUseItemOnMonster(state: MonsterState, itemId: ItemId): boolean {
+  const item: Item = ITEMS[itemId];
+
+  if (item.kind === "stone") {
+    if (state.currentHp <= 0) {
+      return false;
+    }
+    return species(state.speciesId).evolutions?.some((e) => e.requiredItem === itemId) ?? false;
+  }
+
+  if (item.kind === "tm" && item.teachesMove) {
+    return !state.moves.includes(item.teachesMove);
+  }
+
+  if (item.kind === "medicine" || item.kind === "berry") {
+    if (item.revive !== undefined) {
+      return state.currentHp <= 0;
+    }
+    if (item.healFull || item.heal) {
+      return state.currentHp > 0 && state.currentHp < maxHpOf(state);
+    }
+  }
+
+  return false;
+}
+
 /** Resolve a TM `learnChoice`: teach `moveId` into slot `index`. */
 export function teachTmIntoSlot(state: MonsterState, moveId: MoveId, index: number): boolean {
   return learnMoveIntoSlot(state, moveId, index);

@@ -346,9 +346,24 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
   into the team-detail "携带" row as a first visible/testable use.
 - **Single backpack slot** (doc §11): `PlayerState.backpack?: string` (one item id)
   + `stashInBackpack` / `takeFromBackpack` / `isBackpackFull` in runState.ts.
-- NOT yet (rest of 2b): the bag UI panel (open from the team-bar items button),
-  use/equip/discard flow (wire `useItemOnMonster`; TM `learnChoice` → `moveLearnView`),
-  the pickup-decision modal (立即用/携带/进背包/分解), and an item reward source.
+- **Slice 2b-2 — drag-an-item flow (no bag panel)**: with only one backpack slot a
+  full bag UI is unnecessary. The team-bar item slot now shows the stashed item's
+  real icon and is **draggable onto a party square** (`teamHud.ts`). On drop:
+  - if the item can be **used** on that monster right now
+    (`canUseItemOnMonster`, a non-mutating mirror of `useItemOnMonster`'s success
+    conditions) → a small **使用 / 携带** popup (`actionMenu`) opens above the slot;
+  - otherwise (held-only boosters, or an item with no effect on it) → it just
+    **携带** (equips) directly.
+  - `main.ts` `applyBackpackItem(index, action)` routes the choice: 携带 swaps the
+    item with the monster's current `heldItem` (old one drops back into the now-free
+    backpack); 使用 calls `useItemOnMonster` and on success `takeFromBackpack`,
+    handling `evolved` / `learned` / `healed` / `revived` with a transient line.
+  - **TM full-slot** (`learnChoice`) reuses `moveLearnView` via a `bagTmLearn`
+    context (map-side, not the post-battle queue): learning teaches + consumes the
+    TM, skipping leaves it stashed. The map freezes while the menu/modal is open.
+  - Dev hook `gmStash(itemId)` drops an item into the backpack to test the flow.
+- NOT yet (rest of 2b/2c): the pickup-decision modal (立即用/携带/进背包/分解) + an
+  item reward source, berry held auto-trigger, rare-candy level use, and disassembly.
 
 ### Battle System
 

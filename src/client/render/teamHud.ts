@@ -35,6 +35,18 @@ function slotHomeX(pos: number): number {
   return PAD + pos * (SQUARE + GAP);
 }
 
+/** Top-left x of the single backpack item slot within the bar. */
+function itemSlotX(): number {
+  return PAD + 3 * SQUARE + 2 * GAP + GAP;
+}
+
+/** Whether a bar-local point falls inside the backpack item slot. */
+function isOverItemSlot(localX: number, localY: number): boolean {
+  const x = itemSlotX();
+  const y = PAD + (SQUARE - ITEM) / 2;
+  return localX >= x && localX <= x + ITEM && localY >= y && localY <= y + ITEM;
+}
+
 // Move grid geometry (the 4 move cells along the bottom of the detail window).
 const MOVE_CELL_W = 156;
 const MOVE_CELL_H = 64;
@@ -119,10 +131,72 @@ function natureLabel(nature: string): string {
  * (which returns the cached texture immediately once loaded) and assign on
  * resolve; otherwise the slot stays blank.
  */
-function applySpriteTexture(sprite: Sprite, url: string): void {
+// Cache the opaque-fit scale factor per sprite URL (pixel scan is one-time).
+const opaqueFitCache = new Map<string, number>();
+
+/**
+ * Many gen5 PNG sprites carry heavy transparent padding, so the visible body
+ * sits small inside the frame. When both the opaque bounding box's width and
+ * height are under 70% of the source frame, scale the sprite up so its longer
+ * opaque edge reaches 70% of the frame — small-bodied sprites (e.g. 小火龙)
+ * then read at a consistent size. Falls back to 1 on any failure.
+ */
+function opaqueFitFactor(url: string, texture: Texture): number {
+  const cached = opaqueFitCache.get(url);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let factor = 1;
+  try {
+    const source = texture.source;
+    const resource = source.resource as CanvasImageSource | undefined;
+    const w = source.pixelWidth;
+    const h = source.pixelHeight;
+    if (resource && w && h) {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (ctx) {
+        ctx.drawImage(resource, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let minX = w;
+        let minY = h;
+        let maxX = -1;
+        let maxY = -1;
+        for (let y = 0; y < h; y += 1) {
+          for (let x = 0; x < w; x += 1) {
+            if (data[(y * w + x) * 4 + 3] > 8) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (maxX >= 0) {
+          const bw = maxX - minX + 1;
+          const bh = maxY - minY + 1;
+          if (bw < w * 0.7 && bh < h * 0.7) {
+            const longerBbox = Math.max(bw, bh);
+            const longerOrig = bw >= bh ? w : h;
+            factor = (0.7 * longerOrig) / longerBbox;
+          }
+        }
+      }
+    }
+  } catch {
+    factor = 1;
+  }
+  opaqueFitCache.set(url, factor);
+  return factor;
+}
+
+function applySpriteTexture(sprite: Sprite, url: string, baseScale: number): void {
   void Assets.load(url)
     .then((texture: Texture) => {
       sprite.texture = texture;
+      sprite.scale.set(baseScale * opaqueFitFactor(url, texture));
     })
     .catch(() => undefined);
 }
@@ -134,6 +208,8 @@ type MonsterSlot = {
   mask: Graphics;
   border: Graphics;
   empty: Text;
+  /** Bottom-right held-item badge (icon rebuilt per refresh).  */
+  badge: Container;
 };
 
 export type TeamHudView = {
@@ -141,6 +217,8 @@ export type TeamHudView = {
   bar: Container;
   /** Full-screen modal overlay for the detail window; lives above everything. */
   overlay: Container;
+  /** Full-screen layer for the drag-an-item 使用/携带 menu; above the overlay. */
+  actionMenu: Container;
   /** Re-read the roster and repaint the slots (+ open detail, if any). */
   refresh(): void;
   /** Hide the bar and close the detail window (used when leaving the map). */
@@ -148,9 +226,26 @@ export type TeamHudView = {
   /** Close the detail window if it is open. */
   closeDetail(): void;
   isDetailOpen(): boolean;
+  /** Whether the drag-item action menu is currently open. */
+  isItemMenuOpen(): boolean;
 };
 
-export function createTeamHud(roster: MonsterState[], onReorder?: () => void): TeamHudView {
+/** Hooks the scene supplies so the single backpack item can be dragged onto a monster. */
+export type TeamHudOptions = {
+  /** Party reorder / move reorder committed; persist + repaint upstream. */
+  onReorder?: () => void;
+  /** The id of the item currently in the single backpack slot (or undefined). */
+  getBackpackItemId?: () => ItemId | undefined;
+  /** Would 使用 work on roster member `index` right now? Decides 使用/携带 vs auto-携带. */
+  canUseBackpackItemOn?: (monsterIndex: number) => boolean;
+  /** The player dropped the backpack item on roster member `index` and chose an action. */
+  onApplyBackpackItem?: (monsterIndex: number, action: "use" | "equip") => void;
+  /** The player dragged roster member `index` onto the empty backpack slot to unequip its held item. */
+  onUnequipHeldItem?: (monsterIndex: number) => void;
+};
+
+export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = {}): TeamHudView {
+  const { onReorder, getBackpackItemId, canUseBackpackItemOn, onApplyBackpackItem, onUnequipHeldItem } = options;
   const bar = new Container();
   bar.x = GAME_WIDTH - MARGIN - BAR_W;
   bar.y = GAME_HEIGHT - MARGIN - BAR_H;
@@ -169,7 +264,8 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
     slots.push(slot);
   }
 
-  drawItemSlot(bar);
+  const itemSlot = createItemSlot((event) => beginItemPress(event));
+  bar.addChild(itemSlot.container);
 
   // --- Drag-to-reorder the party (decides battle/leadoff order) ---------------
   // `slots[i]` always renders `roster[i]`, so slot index == roster index. While
@@ -183,6 +279,8 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
     grabDX: number;
     started: boolean;
     targetIndex: number;
+    lastX: number;
+    lastY: number;
   } | null = null;
 
   function resetSlotPositions(): void {
@@ -204,7 +302,9 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
       startY: local.y,
       grabDX: local.x - slotHomeX(index),
       started: false,
-      targetIndex: index
+      targetIndex: index,
+      lastX: local.x,
+      lastY: local.y
     };
   }
 
@@ -213,6 +313,8 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
       return;
     }
     const local = bar.toLocal(event.global);
+    drag.lastX = local.x;
+    drag.lastY = local.y;
     const slot = slots[drag.index];
 
     if (!drag.started) {
@@ -224,6 +326,11 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
       slot.container.alpha = 0.92;
       slot.container.cursor = "grabbing";
     }
+
+    // Drop-on-item-slot to unequip: highlight the slot when this monster holds
+    // an item and the backpack is free.
+    const canUnequip = Boolean(roster[drag.index]?.heldItem) && !getBackpackItemId?.();
+    itemSlot.setDropTarget(canUnequip && isOverItemSlot(local.x, local.y));
 
     const lastPos = roster.length - 1;
     const x = clamp(local.x - drag.grabDX, slotHomeX(0), slotHomeX(lastPos));
@@ -256,10 +363,23 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
     const finished = drag;
     drag = null;
     slots[finished.index].container.cursor = "grab";
+    itemSlot.setDropTarget(false);
 
     if (!finished.started) {
       resetSlotPositions();
       openDetail(finished.index);
+      return;
+    }
+
+    // Dropped on the empty backpack slot while holding an item → unequip it.
+    if (
+      isOverItemSlot(finished.lastX, finished.lastY) &&
+      roster[finished.index]?.heldItem &&
+      !getBackpackItemId?.()
+    ) {
+      onUnequipHeldItem?.(finished.index);
+      refresh();
+      resetSlotPositions();
       return;
     }
 
@@ -275,6 +395,168 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
   bar.on("globalpointermove", onDragMove);
   bar.on("pointerup", onDragEnd);
   bar.on("pointerupoutside", onDragEnd);
+
+  // --- Drag the single backpack item onto a monster ---------------------------
+  // The item slot (right of the party squares) shows the backpack item's icon
+  // when one is stashed. Press-drag it left onto a party square; on drop, if the
+  // item can be 使用 on that monster we pop a 使用 / 携带 menu, otherwise we just
+  // 携带 (equip) it — held-only items (type boosters, etc.) are never "used".
+  let itemDrag: {
+    startX: number;
+    startY: number;
+    started: boolean;
+    ghost: Container | null;
+  } | null = null;
+
+  function beginItemPress(event: FederatedPointerEvent): void {
+    if (!getBackpackItemId?.()) {
+      return;
+    }
+    const local = bar.toLocal(event.global);
+    itemDrag = { startX: local.x, startY: local.y, started: false, ghost: null };
+  }
+
+  /** Party-square index under a bar-local point, or -1. */
+  function monsterSlotAt(localX: number, localY: number): number {
+    if (localY < PAD || localY > PAD + SQUARE) {
+      return -1;
+    }
+    for (let i = 0; i < roster.length; i += 1) {
+      if (!roster[i]) {
+        continue;
+      }
+      const x0 = slotHomeX(i);
+      if (localX >= x0 && localX <= x0 + SQUARE) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  function onItemDragMove(event: FederatedPointerEvent): void {
+    if (!itemDrag) {
+      return;
+    }
+    const itemId = getBackpackItemId?.();
+    if (!itemId) {
+      cancelItemDrag();
+      return;
+    }
+    const local = bar.toLocal(event.global);
+
+    if (!itemDrag.started) {
+      if (Math.hypot(local.x - itemDrag.startX, local.y - itemDrag.startY) < DRAG_THRESHOLD) {
+        return;
+      }
+      itemDrag.started = true;
+      itemSlot.setDragging(true);
+      const ghost = createItemIcon(itemId, ITEM - 8);
+      ghost.alpha = 0.92;
+      bar.addChild(ghost);
+      itemDrag.ghost = ghost;
+    }
+
+    if (itemDrag.ghost) {
+      itemDrag.ghost.x = local.x - (ITEM - 8) / 2;
+      itemDrag.ghost.y = local.y - (ITEM - 8) / 2;
+    }
+
+    const hovered = monsterSlotAt(local.x, local.y);
+    for (let i = 0; i < slots.length; i += 1) {
+      slots[i].container.alpha = hovered === i ? 0.8 : 1;
+    }
+  }
+
+  function onItemDragEnd(event: FederatedPointerEvent): void {
+    if (!itemDrag) {
+      return;
+    }
+    const started = itemDrag.started;
+    const local = bar.toLocal(event.global);
+    cancelItemDrag();
+    if (!started) {
+      return;
+    }
+    const target = monsterSlotAt(local.x, local.y);
+    if (target < 0 || !getBackpackItemId?.()) {
+      return;
+    }
+    if (canUseBackpackItemOn?.(target)) {
+      openItemActionMenu(target);
+    } else {
+      onApplyBackpackItem?.(target, "equip");
+    }
+  }
+
+  function cancelItemDrag(): void {
+    if (itemDrag?.ghost) {
+      itemDrag.ghost.destroy({ children: true });
+    }
+    itemDrag = null;
+    itemSlot.setDragging(false);
+    for (let i = 0; i < slots.length; i += 1) {
+      slots[i].container.alpha = 1;
+    }
+  }
+
+  bar.on("globalpointermove", onItemDragMove);
+  bar.on("pointerup", onItemDragEnd);
+  bar.on("pointerupoutside", onItemDragEnd);
+
+  // The 使用 / 携带 popup, raised over everything (its own full-screen layer).
+  const actionMenu = new Container();
+  actionMenu.visible = false;
+
+  const menuBackdrop = new Graphics();
+  menuBackdrop.rect(0, 0, GAME_WIDTH, GAME_HEIGHT).fill({ color: "#05040a", alpha: 0.01 });
+  menuBackdrop.eventMode = "static";
+  menuBackdrop.cursor = "default";
+  menuBackdrop.on("pointertap", () => closeItemMenu());
+  actionMenu.addChild(menuBackdrop);
+
+  const menuPanel = new Container();
+  actionMenu.addChild(menuPanel);
+
+  function closeItemMenu(): void {
+    actionMenu.visible = false;
+  }
+
+  function openItemActionMenu(monsterIndex: number): void {
+    menuPanel.removeChildren().forEach((child) => child.destroy({ children: true }));
+
+    const MENU_W = 132;
+    const BTN_H = 34;
+    const PADDING = 8;
+    const MENU_H = PADDING * 2 + BTN_H * 2 + 6;
+
+    const frame = new Graphics();
+    frame.roundRect(4, 5, MENU_W, MENU_H, 10).fill({ color: "#0a0911", alpha: 0.5 });
+    frame.roundRect(0, 0, MENU_W, MENU_H, 10).fill(PALETTE.panelEdgeDark);
+    frame.roundRect(2, 2, MENU_W - 4, MENU_H - 4, 9).fill(PALETTE.panelFace);
+    frame.roundRect(2, 2, MENU_W - 4, MENU_H - 4, 9).stroke({ color: PALETTE.panelEdgeLight, width: 2 });
+    frame.eventMode = "static";
+    menuPanel.addChild(frame);
+
+    menuPanel.addChild(
+      createMenuButton("使用", PADDING, PADDING, MENU_W - PADDING * 2, BTN_H, () => {
+        closeItemMenu();
+        onApplyBackpackItem?.(monsterIndex, "use");
+      })
+    );
+    menuPanel.addChild(
+      createMenuButton("携带", PADDING, PADDING + BTN_H + 6, MENU_W - PADDING * 2, BTN_H, () => {
+        closeItemMenu();
+        onApplyBackpackItem?.(monsterIndex, "equip");
+      })
+    );
+
+    // Anchor above the target party square (bar-local → stage coords).
+    const slotCenterX = bar.x + slotHomeX(monsterIndex) + SQUARE / 2;
+    const slotTopY = bar.y + PAD;
+    menuPanel.x = Math.round(clamp(slotCenterX - MENU_W / 2, 8, GAME_WIDTH - MENU_W - 8));
+    menuPanel.y = Math.round(slotTopY - MENU_H - 10);
+    actionMenu.visible = true;
+  }
 
   // Detail modal.
   const overlay = new Container();
@@ -449,6 +731,7 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
     for (let i = 0; i < slots.length; i += 1) {
       updateMonsterSlot(slots[i], roster[i]);
     }
+    itemSlot.update(getBackpackItemId?.());
     if (openIndex !== null) {
       const monster = roster[openIndex];
       if (monster) {
@@ -463,6 +746,7 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
     bar.visible = visible;
     if (!visible) {
       closeDetail();
+      closeItemMenu();
     }
   }
 
@@ -471,10 +755,12 @@ export function createTeamHud(roster: MonsterState[], onReorder?: () => void): T
   return {
     bar,
     overlay,
+    actionMenu,
     refresh,
     setVisible,
     closeDetail,
-    isDetailOpen: () => openIndex !== null
+    isDetailOpen: () => openIndex !== null,
+    isItemMenuOpen: () => actionMenu.visible
   };
 }
 
@@ -523,18 +809,23 @@ function createMonsterSlot(onPointerDown: (event: FederatedPointerEvent) => void
   const border = new Graphics();
   container.addChild(border);
 
+  // Bottom-right corner badge showing the monster's held item, if any.
+  const badge = new Container();
+  container.addChild(badge);
+
   const empty = new Text({ text: "空", style: styles.slotEmpty });
   empty.anchor.set(0.5);
   empty.x = SQUARE / 2;
   empty.y = SQUARE / 2;
   container.addChild(empty);
 
-  return { container, bg, sprite, mask, border, empty };
+  return { container, bg, sprite, mask, border, empty, badge };
 }
 
 function updateMonsterSlot(slot: MonsterSlot, monster: MonsterState | undefined): void {
   slot.border.clear();
   slot.bg.clear();
+  slot.badge.removeChildren().forEach((child) => child.destroy({ children: true }));
 
   if (!monster) {
     slot.container.eventMode = "none";
@@ -559,30 +850,130 @@ function updateMonsterSlot(slot: MonsterSlot, monster: MonsterState | undefined)
   slot.bg.roundRect(3, 3, SQUARE - 6, SQUARE - 6, 6).fill(adjustColor(color, -0.18));
   slot.bg.roundRect(3, 3, SQUARE - 6, SQUARE - 6 * 0.5, 6).fill({ color, alpha: 0.95 });
 
-  applySpriteTexture(slot.sprite, getBattleSpriteUrl(monster.speciesId, "front"));
+  applySpriteTexture(slot.sprite, getBattleSpriteUrl(monster.speciesId, "front"), 0.5);
   slot.sprite.alpha = fainted ? 0.45 : 1;
 
   slot.border.roundRect(3, 3, SQUARE - 6, SQUARE - 6, 7).stroke({ color: adjustColor(color, 0.4), width: 2 });
   if (fainted) {
     slot.border.roundRect(3, 3, SQUARE - 6, SQUARE - 6, 7).fill({ color: "#05040a", alpha: 0.35 });
   }
+
+  // Held-item badge: the item's icon tucked into the bottom-right corner.
+  if (monster.heldItem && monster.heldItem in ITEMS) {
+    const badgeSize = 22;
+    const icon = createItemIcon(monster.heldItem as ItemId, badgeSize);
+    icon.x = SQUARE - badgeSize - 2;
+    icon.y = SQUARE - badgeSize - 2;
+    slot.badge.addChild(icon);
+  }
 }
 
-function drawItemSlot(bar: Container): void {
+type ItemSlotView = {
+  container: Container;
+  /** Repaint for the current backpack item id (undefined = empty). */
+  update(itemId: ItemId | undefined): void;
+  /** Dim the slot while its item is being dragged out. */
+  setDragging(on: boolean): void;
+  /** Glow the slot while a held-item monster hovers over it (drop-to-unequip). */
+  setDropTarget(on: boolean): void;
+};
+
+/**
+ * The single backpack slot at the right of the bar. Empty → a "道具" hint;
+ * occupied → the item's icon, draggable onto a party square. `onPointerDown`
+ * starts the drag (only fires when an item is present).
+ */
+function createItemSlot(onPointerDown: (event: FederatedPointerEvent) => void): ItemSlotView {
   const x = PAD + 3 * SQUARE + 2 * GAP + GAP;
   const y = PAD + (SQUARE - ITEM) / 2;
 
-  const slot = new Graphics();
-  slot.roundRect(x, y, ITEM, ITEM, 7).fill(PALETTE.panelEdgeDark);
-  slot.roundRect(x + 3, y + 3, ITEM - 6, ITEM - 6, 5).fill({ color: PALETTE.panelBack, alpha: 0.8 });
-  slot.roundRect(x + 3, y + 3, ITEM - 6, ITEM - 6, 5).stroke({ color: PALETTE.gold, width: 1, alpha: 0.5 });
-  bar.addChild(slot);
+  const container = new Container();
+  container.on("pointerdown", onPointerDown);
+
+  const frame = new Graphics();
+  frame.roundRect(x, y, ITEM, ITEM, 7).fill(PALETTE.panelEdgeDark);
+  frame.roundRect(x + 3, y + 3, ITEM - 6, ITEM - 6, 5).fill({ color: PALETTE.panelBack, alpha: 0.8 });
+  frame.roundRect(x + 3, y + 3, ITEM - 6, ITEM - 6, 5).stroke({ color: PALETTE.gold, width: 1, alpha: 0.5 });
+  container.addChild(frame);
+
+  // Drop-to-unequip highlight ring (shown only while a held-item monster hovers).
+  const dropGlow = new Graphics();
+  dropGlow.visible = false;
+  dropGlow.roundRect(x - 2, y - 2, ITEM + 4, ITEM + 4, 8).stroke({ color: PALETTE.gold, width: 2.5 });
+  container.addChild(dropGlow);
 
   const hint = new Text({ text: "道具", style: styles.itemHint });
   hint.anchor.set(0.5);
   hint.x = x + ITEM / 2;
   hint.y = y + ITEM / 2;
-  bar.addChild(hint);
+  container.addChild(hint);
+
+  let icon: Container | null = null;
+  let currentId: ItemId | undefined;
+
+  function update(itemId: ItemId | undefined): void {
+    if (itemId === currentId) {
+      return;
+    }
+    currentId = itemId;
+    if (icon) {
+      icon.destroy({ children: true });
+      icon = null;
+    }
+    if (itemId) {
+      hint.visible = false;
+      icon = createItemIcon(itemId, ITEM - 12);
+      icon.x = x + 6;
+      icon.y = y + 6;
+      container.addChild(icon);
+      container.eventMode = "static";
+      container.cursor = "grab";
+    } else {
+      hint.visible = true;
+      container.eventMode = "none";
+      container.cursor = "default";
+    }
+  }
+
+  function setDragging(on: boolean): void {
+    container.alpha = on ? 0.4 : 1;
+  }
+
+  function setDropTarget(on: boolean): void {
+    dropGlow.visible = on;
+  }
+
+  return { container, update, setDragging, setDropTarget };
+}
+
+/** A small flat pixel button for the drag-item action menu. */
+function createMenuButton(label: string, x: number, y: number, w: number, h: number, onTap: () => void): Container {
+  const container = new Container();
+  container.x = x;
+  container.y = y;
+  container.eventMode = "static";
+  container.cursor = "pointer";
+
+  const bg = new Graphics();
+  const paint = (hover: boolean) => {
+    bg.clear();
+    bg.roundRect(0, 0, w, h, 7).fill(PALETTE.panelEdgeDark);
+    bg.roundRect(2, 2, w - 4, h - 4, 6).fill(hover ? adjustColor(PALETTE.gold, -0.35) : PALETTE.panelBack);
+    bg.roundRect(2, 2, w - 4, h - 4, 6).stroke({ color: PALETTE.gold, width: 1, alpha: hover ? 1 : 0.6 });
+  };
+  paint(false);
+  container.addChild(bg);
+
+  const text = new Text({ text: label, style: styles.value });
+  text.anchor.set(0.5);
+  text.x = w / 2;
+  text.y = h / 2;
+  container.addChild(text);
+
+  container.on("pointertap", onTap);
+  container.on("pointerover", () => paint(true));
+  container.on("pointerout", () => paint(false));
+  return container;
 }
 
 function drawDetailFrame(frame: Graphics): void {
@@ -658,11 +1049,10 @@ function buildDetailContent(content: Container, monster: MonsterState): Containe
   content.addChild(portrait);
 
   const portraitSprite = new Sprite(Texture.EMPTY);
-  applySpriteTexture(portraitSprite, getBattleSpriteUrl(monster.speciesId, "front"));
+  applySpriteTexture(portraitSprite, getBattleSpriteUrl(monster.speciesId, "front"), 1.25);
   portraitSprite.anchor.set(0.5, 0.5);
   portraitSprite.x = 28 + 70;
   portraitSprite.y = 72 + 70;
-  portraitSprite.scale.set(1.25);
   const portraitMask = new Graphics();
   portraitMask.roundRect(31, 75, 134, 134, 10).fill(0xffffff);
   content.addChild(portraitMask);
