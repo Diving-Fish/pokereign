@@ -76,6 +76,7 @@ export type BattleMoveEvent = {
 export type BattleDamageEvent = {
   type: "damage";
   targetId: string;
+  targetSide: BattleSide;
   targetName: string;
   damage: number;
   hpBefore: number;
@@ -84,12 +85,27 @@ export type BattleDamageEvent = {
   fainted: boolean;
 };
 
+/**
+ * A battler leaving / entering the active slot. `switch` is a deliberate recall
+ * (the previous mon must retreat first); `promote` follows a faint (the previous
+ * mon already fell, so only the newcomer enters). Carries instance ids so the
+ * renderer can pin the exact battler being animated out/in.
+ */
+export type BattleSwitchEvent = {
+  type: "switch";
+  side: BattleSide;
+  reason: "switch" | "promote";
+  fromId: string | null;
+  toId: string;
+  text: string;
+};
+
 export type BattleMessageEvent = {
   type: "message";
   text: string;
 };
 
-export type BattleEvent = BattleMoveEvent | BattleDamageEvent | BattleMessageEvent;
+export type BattleEvent = BattleMoveEvent | BattleDamageEvent | BattleSwitchEvent | BattleMessageEvent;
 
 export type BattleTurnResult = {
   log: string[];

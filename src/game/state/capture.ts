@@ -42,8 +42,8 @@ export type CaptureTarget = {
 };
 
 export type CaptureResult =
-  | { outcome: "captured"; chance: number }
-  | { outcome: "escaped"; chance: number }
+  | { outcome: "captured"; chance: number; shakes: 3 }
+  | { outcome: "escaped"; chance: number; shakes: 0 | 1 | 2 }
   /** Tier forbids direct capture; no roll was consumed. */
   | { outcome: "uncatchable" };
 
@@ -77,17 +77,27 @@ export function computeCatchChance(target: CaptureTarget): number {
 /**
  * Resolve one capture attempt against the deterministic run RNG. Returns
  * `uncatchable` (without consuming a roll) when the tier forbids direct capture.
- * The "one attempt per battle" rule and post-capture handling (roster insert at
- * team level - 1, XP award) live in the battle flow, not here.
+ *
+ * Original-style three-shake model: the ball wobbles up to three times, each
+ * wobble its own check at the cube-root of the final chance (so three passes
+ * multiply back to `chance`). `shakes` is how many wobbles succeed before it
+ * either clicks shut (3 = caught) or bursts open (0–2 = escaped) — the renderer
+ * plays exactly that many wobbles. The "one attempt per battle" rule and
+ * post-capture handling (roster insert, XP award) live in the battle flow.
  */
 export function attemptCapture(target: CaptureTarget, rng: Rng): CaptureResult {
   if (!isDirectlyCapturable(target.capture)) {
     return { outcome: "uncatchable" };
   }
   const chance = computeCatchChance(target);
-  return rng.next() < chance
-    ? { outcome: "captured", chance }
-    : { outcome: "escaped", chance };
+  const perShake = Math.cbrt(chance);
+  let shakes = 0;
+  while (shakes < 3 && rng.next() < perShake) {
+    shakes += 1;
+  }
+  return shakes >= 3
+    ? { outcome: "captured", chance, shakes: 3 }
+    : { outcome: "escaped", chance, shakes: shakes as 0 | 1 | 2 };
 }
 
 function clamp(value: number, min: number, max: number): number {

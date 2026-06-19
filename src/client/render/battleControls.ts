@@ -38,7 +38,8 @@ const styles = {
   pokeName: new TextStyle(pixelText({ fill: PALETTE.btnInk, fontSize: 15, fontWeight: "700", shadow: true })),
   pokeHp: new TextStyle(pixelText({ fill: PALETTE.btnInkSoft, fontSize: 11, fontWeight: "700" })),
   pokeTag: new TextStyle(pixelText({ fill: PALETTE.gold, fontSize: 11, fontWeight: "700" })),
-  capture: new TextStyle(pixelText({ fill: PALETTE.btnInk, fontSize: 16, fontWeight: "700", shadow: true }))
+  capture: new TextStyle(pixelText({ fill: PALETTE.btnInk, fontSize: 16, fontWeight: "700", shadow: true })),
+  prompt: new TextStyle(pixelText({ fill: PALETTE.gold, fontSize: 18, fontWeight: "700", shadow: true }))
 };
 
 export type BattleControlsCallbacks = {
@@ -70,7 +71,11 @@ type PokeButton = {
 
 export type BattleControlsView = {
   container: Container;
-  update(view: BattleStateView, getHp: (instanceId: string, fallback: number) => number): void;
+  /**
+   * `forceSwitch` is the post-faint replacement mode: moves and capture are
+   * disabled so only a benched party pick is possible.
+   */
+  update(view: BattleStateView, getHp: (instanceId: string, fallback: number) => number, forceSwitch?: boolean): void;
 };
 
 /**
@@ -164,22 +169,33 @@ export function createBattleControls(callbacks: BattleControlsCallbacks): Battle
   captureButton.content.addChild(captureLabel);
   container.addChild(captureButton.container);
 
-  function update(view: BattleStateView, getHp: (instanceId: string, fallback: number) => number): void {
-    updateMoveButtons(moveButtons, view);
+  // Shown only in the post-faint replacement mode, in place of the move row.
+  const prompt = new Text({ text: "倒下了！选择下一只出战精灵", style: styles.prompt });
+  prompt.anchor.set(0.5, 0.5);
+  prompt.x = INNER_LEFT + (4 * MOVE_BTN_W + 3 * MOVE_GAP) / 2;
+  prompt.y = MOVE_ROW_Y + MOVE_BTN_H / 2;
+  prompt.visible = false;
+  container.addChild(prompt);
+
+  function update(view: BattleStateView, getHp: (instanceId: string, fallback: number) => number, forceSwitch = false): void {
+    updateMoveButtons(moveButtons, view, forceSwitch);
     updatePokeButtons(pokeButtons, view, getHp);
+    captureButton.setEnabled(!forceSwitch);
+    prompt.visible = forceSwitch;
   }
 
   return { container, update };
 }
 
-function updateMoveButtons(buttons: MoveButton[], view: BattleStateView): void {
+function updateMoveButtons(buttons: MoveButton[], view: BattleStateView, forceSwitch: boolean): void {
   const moves = view.player.active.moves;
   for (let index = 0; index < buttons.length; index += 1) {
     const entry = buttons[index];
     const moveId = moves[index];
     const exists = moveId !== undefined;
-    entry.button.container.visible = exists;
-    entry.button.setEnabled(exists);
+    // In replacement mode the move row is replaced by the pick prompt.
+    entry.button.container.visible = exists && !forceSwitch;
+    entry.button.setEnabled(exists && !forceSwitch);
     if (!exists) {
       entry.appliedKey = "";
       continue;

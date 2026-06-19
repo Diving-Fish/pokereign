@@ -77,13 +77,46 @@ export class BattleEngine {
     }
 
     this.autoPromoteFaintedOpponent(log, events);
-    this.autoPromoteFaintedPlayer(log, events);
+    // The player's downed mon is NOT auto-promoted: the UI prompts a manual pick
+    // (see `needsPlayerReplacement` / `promotePlayer`). It stays the fainted
+    // active until then, with the battle still `ongoing` while a bench survives.
 
     return {
       log,
       events,
       outcome: this.getOutcome()
     };
+  }
+
+  /** True when the active player mon has fainted but a benched one can still take over. */
+  needsPlayerReplacement(): boolean {
+    return isFainted(this.playerRoster[this.playerActiveIndex]) && this.playerRoster.some((monster) => !isFainted(monster));
+  }
+
+  /**
+   * Manually send out a benched player mon after a faint. This is a free swap
+   * (the foe does not act), so it runs outside `runTurn`; it only emits the
+   * entrance and re-checks the outcome.
+   */
+  promotePlayer(index: number): BattleTurnResult {
+    const log: string[] = [];
+    const events: BattleEvent[] = [];
+    const target = this.playerRoster[index];
+    if (target && !isFainted(target) && index !== this.playerActiveIndex) {
+      const previous = this.playerRoster[this.playerActiveIndex];
+      this.playerActiveIndex = index;
+      const text = `去吧，${target.name}！`;
+      log.push(text);
+      events.push({
+        type: "switch",
+        side: "player",
+        reason: "promote",
+        fromId: previous.instanceId,
+        toId: target.instanceId,
+        text
+      });
+    }
+    return { log, events, outcome: this.getOutcome() };
   }
 
   private switchPlayer(targetIndex: number, log: string[], events: BattleEvent[]): void {
@@ -96,8 +129,16 @@ export class BattleEngine {
 
     const previous = this.playerRoster[this.playerActiveIndex];
     this.playerActiveIndex = targetIndex;
-    log.push(`${previous.name} 回来！去吧，${target.name}！`);
-    events.push({ type: "message", text: `${previous.name} 回来！去吧，${target.name}！` });
+    const text = `${previous.name} 回来！去吧，${target.name}！`;
+    log.push(text);
+    events.push({
+      type: "switch",
+      side: "player",
+      reason: "switch",
+      fromId: previous.instanceId,
+      toId: target.instanceId,
+      text
+    });
   }
 
   private pickOpponentCommand(): { type: "move"; moveId: MoveId } {
@@ -147,6 +188,7 @@ export class BattleEngine {
     events.push({
       type: "damage",
       targetId: target.instanceId,
+      targetSide: target.side,
       targetName: target.name,
       damage,
       hpBefore,
@@ -195,24 +237,21 @@ export class BattleEngine {
       return;
     }
 
+    const previous = this.opponentRoster[this.opponentActiveIndex];
     const nextIndex = this.opponentRoster.findIndex((monster) => monster.currentHp > 0);
     if (nextIndex >= 0) {
       this.opponentActiveIndex = nextIndex;
-      log.push(`对手派出了 ${this.opponentRoster[nextIndex].name}。`);
-      events.push({ type: "message", text: `对手派出了 ${this.opponentRoster[nextIndex].name}。` });
-    }
-  }
-
-  private autoPromoteFaintedPlayer(log: string[], events: BattleEvent[]): void {
-    if (!isFainted(this.playerRoster[this.playerActiveIndex])) {
-      return;
-    }
-
-    const nextIndex = this.playerRoster.findIndex((monster) => monster.currentHp > 0);
-    if (nextIndex >= 0) {
-      this.playerActiveIndex = nextIndex;
-      log.push(`${this.playerRoster[nextIndex].name} 自动上场。`);
-      events.push({ type: "message", text: `${this.playerRoster[nextIndex].name} 自动上场。` });
+      const next = this.opponentRoster[nextIndex];
+      const text = `对手派出了 ${next.name}。`;
+      log.push(text);
+      events.push({
+        type: "switch",
+        side: "foe",
+        reason: "promote",
+        fromId: previous.instanceId,
+        toId: next.instanceId,
+        text
+      });
     }
   }
 

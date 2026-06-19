@@ -36,15 +36,21 @@ type BattleSpriteAnimation = {
 };
 type HpTween = {
   targetId: string;
+  targetSide: BattleSide;
   from: number;
   to: number;
   elapsed: number;
   duration: number;
 };
+/** How an active battler exits its slot when swapped out. */
+type SpriteExitMode = "switchOut" | "faintOut" | "captureOut";
 type PlaybackStep =
   | { kind: "text"; text: string; duration: number; elapsed: number }
   | { kind: "move"; event: BattleMoveEvent; duration: number; elapsed: number }
-  | { kind: "hp"; tween: HpTween };
+  | { kind: "hp"; tween: HpTween }
+  | { kind: "spriteOut"; side: BattleSide; instanceId: string; mode: SpriteExitMode; duration: number; elapsed: number }
+  | { kind: "spriteIn"; side: BattleSide; instanceId: string; duration: number; elapsed: number }
+  | { kind: "capture"; foeId: string; shakes: number; captured: boolean; duration: number; elapsed: number };
 type HpBarView = {
   fill: Graphics;
 };
@@ -73,6 +79,7 @@ type BattleRenderView = {
   projectileBurst: Graphics;
   contactFlash: Graphics;
   statusPulse: Graphics;
+  captureBall: Graphics;
   playerPanel: MonsterPanelView;
   foePanel: MonsterPanelView;
   dialog: BattleDialogView;
@@ -217,6 +224,9 @@ let activeEncounterId: string | null = null;
 let activeFoeLevel = 0;
 // One capture attempt per battle: set once the player throws, win or lose.
 let captureUsed = false;
+// After the active player mon faints with a live bench, the controls switch to a
+// forced replacement pick (only party buttons act) until the player sends one in.
+let awaitingReplacement = false;
 // Whether the current foe is a boss/elite form — never directly capturable,
 // regardless of its species' capture profile.
 let activeFoeIsBoss = false;
@@ -232,6 +242,78 @@ let currentPlaybackStep: PlaybackStep | null = null;
 let spriteAnimation: BattleSpriteAnimation | null = null;
 let hpTween: HpTween | null = null;
 let pendingOutcome: BattleOutcome = "ongoing";
+
+// Per-side battler swap state. `instanceId` pins which roster member is drawn
+// (sprite + status panel) so an exiting mon stays on screen until its leave
+// animation finishes, instead of snapping to the live `battleView.active` the
+// engine already advanced. `null` = follow the live active. `hidden` keeps a
+// departed mon (post-faint / captured) off screen until a newcomer enters.
+type BattlerFxState = {
+  instanceId: string | null;
+  hidden: boolean;
+  transition: { kind: SpriteExitMode | "in"; elapsed: number; duration: number } | null;
+};
+const battlerFx: Record<BattleSide, BattlerFxState> = {
+  player: { instanceId: null, hidden: false, transition: null },
+  foe: { instanceId: null, hidden: false, transition: null }
+};
+function resetBattlerFx(): void {
+  battlerFx.player = { instanceId: null, hidden: false, transition: null };
+  battlerFx.foe = { instanceId: null, hidden: false, transition: null };
+}
+
+// Poké Ball capture sequence — original-style throw → absorb → drop+bounce →
+// wobble → click/burst. Phase lengths (ms); `captureSequenceDuration` sums them
+// for the playback step's total. The wobble count is the number of passed shake
+// checks (3 = caught). `captureBall` is the live draw state the ball Graphics reads.
+const CAPTURE_THROW_MS = 460;
+const CAPTURE_ABSORB_MS = 500; // ~0.5s of the foe being drawn in
+const CAPTURE_FALL_MS = 300; // ball drops from above the foe to the ground
+// Four ground bounces, each lower and quicker than the last (tall, slow hops).
+const CAPTURE_BOUNCES: ReadonlyArray<{ dur: number; peak: number }> = [
+  { dur: 380, peak: 96 },
+  { dur: 320, peak: 56 },
+  { dur: 260, peak: 30 },
+  { dur: 210, peak: 14 }
+];
+const CAPTURE_BOUNCE_MS = CAPTURE_FALL_MS + CAPTURE_BOUNCES.reduce((sum, hop) => sum + hop.dur, 0);
+// Pause on the ground after the last bounce before the first shake check.
+const CAPTURE_SETTLE_MS = 360;
+// Each shake check gets a full 1s slot: a short tilt up front, then a pause to
+// the next check. Caught plays all three; an escape stops after the failed one.
+const CAPTURE_SHAKE_CYCLE_MS = 1000;
+const CAPTURE_SHAKE_ANIM_MS = 420;
+const CAPTURE_CLICK_MS = 560;
+const CAPTURE_BURST_MS = 440;
+function captureSequenceDuration(shakes: number, captured: boolean): number {
+  const wobbles = captured ? 3 : shakes;
+  return (
+    CAPTURE_THROW_MS +
+    CAPTURE_ABSORB_MS +
+    CAPTURE_BOUNCE_MS +
+    CAPTURE_SETTLE_MS +
+    CAPTURE_SHAKE_CYCLE_MS * wobbles +
+    (captured ? CAPTURE_CLICK_MS : CAPTURE_BURST_MS)
+  );
+}
+
+/** Ball height during the drop + four decaying bounces (local ms into that phase). */
+function captureBounceY(local: number, fromY: number, groundY: number): number {
+  if (local < CAPTURE_FALL_MS) {
+    const p = local / CAPTURE_FALL_MS;
+    return lerp(fromY, groundY, p * p); // accelerating fall
+  }
+  let remaining = local - CAPTURE_FALL_MS;
+  for (const hop of CAPTURE_BOUNCES) {
+    if (remaining < hop.dur) {
+      return groundY - hop.peak * Math.sin(Math.PI * (remaining / hop.dur));
+    }
+    remaining -= hop.dur;
+  }
+  return groundY;
+}
+type CaptureBallState = { visible: boolean; x: number; y: number; tilt: number; openness: number; flash: number };
+const captureBall: CaptureBallState = { visible: false, x: 0, y: 0, tilt: 0, openness: 0, flash: 0 };
 // While set in the future, a short non-playback banner (e.g. the capture
 // placeholder) is shown over the control buttons.
 let transientUntil = 0;
@@ -382,7 +464,9 @@ function startBattle(encounter: MapEncounterObject): void {
   currentPlaybackStep = null;
   spriteAnimation = null;
   hpTween = null;
+  resetBattlerFx();
   pendingOutcome = "ongoing";
+  awaitingReplacement = false;
   transientUntil = 0;
   displayedHp.clear();
   battleIntroStart = elapsed;
@@ -419,7 +503,7 @@ function handleBattleKey(event: KeyboardEvent): void {
 
 /** Use the move in the given slot (0-3) if it exists. Shared by clicks + hotkeys. */
 function tryUseMove(index: number): void {
-  if (!battle || !battleView || isPlaybackActive()) {
+  if (!battle || !battleView || isPlaybackActive() || awaitingReplacement) {
     return;
   }
   const moveId = battleView.player.active.moves[index];
@@ -434,11 +518,34 @@ function trySwitch(index: number): void {
   if (!battle || !battleView || isPlaybackActive()) {
     return;
   }
+  // After a faint, a party tap is a forced replacement (a free swap), not a turn.
+  if (awaitingReplacement) {
+    tryReplace(index);
+    return;
+  }
   const monster = battleView.player.roster[index];
   if (!monster || index === battleView.player.activeIndex || monster.currentHp <= 0) {
     return;
   }
   runBattleTurn({ type: "switch", targetIndex: index });
+}
+
+/** Send out a benched mon to replace the fainted active — a free swap, no foe turn. */
+function tryReplace(index: number): void {
+  if (!battle || !battleView || isPlaybackActive() || !awaitingReplacement) {
+    return;
+  }
+  const monster = battleView.player.roster[index];
+  if (!monster || index === battleView.player.activeIndex || monster.currentHp <= 0) {
+    return;
+  }
+  const beforePlayerId = battleView.player.active.instanceId;
+  const beforeFoeId = battleView.opponent.active.instanceId;
+  const result = battle.promotePlayer(index);
+  battleView = battle.view();
+  pinDepartingActives(beforePlayerId, beforeFoeId);
+  awaitingReplacement = false;
+  queueBattlePlayback(result.events, result.outcome);
 }
 
 /**
@@ -447,7 +554,7 @@ function trySwitch(index: number): void {
  * directly. Resolves against the seeded run RNG; success returns to the map.
  */
 function tryCapture(): void {
-  if (!battle || !battleView || isPlaybackActive()) {
+  if (!battle || !battleView || isPlaybackActive() || awaitingReplacement) {
     return;
   }
   if (captureUsed) {
@@ -480,9 +587,22 @@ function tryCapture(): void {
 function queueCapturePlayback(foe: BattleMonster, result: CaptureResult): void {
   playbackSteps = [];
 
-  if (result.outcome !== "captured") {
+  const captured = result.outcome === "captured";
+  const shakes = result.outcome === "uncatchable" ? 0 : result.shakes;
+  // The Poké Ball arc/absorb/wobble plays out first; the wobble count tells the
+  // story (more shakes = a closer call) before it clicks shut or bursts open.
+  playbackSteps.push({
+    kind: "capture",
+    foeId: foe.instanceId,
+    shakes,
+    captured,
+    duration: captureSequenceDuration(shakes, captured),
+    elapsed: 0
+  });
+
+  if (!captured) {
     pendingOutcome = "ongoing";
-    playbackSteps.push({ kind: "text", text: `可恶！${foe.name} 挣脱了精灵球。`, duration: 900, elapsed: 0 });
+    playbackSteps.push({ kind: "text", text: `可恶！${foe.name} 挣脱了精灵球。`, duration: 760, elapsed: 0 });
     playbackSteps.push({ kind: "text", text: "这场战斗只能将它打倒了。", duration: 900, elapsed: 0 });
     return;
   }
@@ -502,13 +622,13 @@ function queueCapturePlayback(foe: BattleMonster, result: CaptureResult): void {
 
   // Joins at the level it was caught at — what you see in the wild is what you
   // get (overrides doc §7.1's "team level - 1").
-  const captured = createMonsterState(foe.speciesId, clamp(foe.level, 1, MAX_LEVEL));
+  const caught = createMonsterState(foe.speciesId, clamp(foe.level, 1, MAX_LEVEL));
 
   if (playerRoster.length < MAX_TEAM_SIZE) {
-    playerRoster.push(captured);
-    playbackSteps.push({ kind: "text", text: `${SPECIES[captured.speciesId].name} 加入了队伍！`, duration: 900, elapsed: 0 });
+    playerRoster.push(caught);
+    playbackSteps.push({ kind: "text", text: `${SPECIES[caught.speciesId].name} 加入了队伍！`, duration: 900, elapsed: 0 });
   } else {
-    pendingCapturedMonster = captured;
+    pendingCapturedMonster = caught;
     playbackSteps.push({ kind: "text", text: "队伍已满，需要决定它的去留。", duration: 900, elapsed: 0 });
   }
 }
@@ -552,9 +672,31 @@ function runBattleTurn(command: BattleCommand): void {
   }
 
   captureDisplayedHp(battleView);
+  // Snapshot who is active *before* the turn: the engine advances the active
+  // slot synchronously, so without pinning the outgoing mon the renderer would
+  // flash the incoming one for a few frames before the swap animation plays.
+  const beforePlayerId = battleView.player.active.instanceId;
+  const beforeFoeId = battleView.opponent.active.instanceId;
   const result = battle.runTurn(command);
   battleView = battle.view();
+  pinDepartingActives(beforePlayerId, beforeFoeId);
+  // A fainted active with a live bench hands control to the replacement picker
+  // once this turn's playback (including the faint-out) finishes.
+  awaitingReplacement = battle.needsPlayerReplacement();
   queueBattlePlayback(result.events, result.outcome);
+}
+
+/** Keep the renderer on each side's pre-turn active until the swap steps take over. */
+function pinDepartingActives(prevPlayerId: string, prevFoeId: string): void {
+  if (!battleView) {
+    return;
+  }
+  if (battleView.player.active.instanceId !== prevPlayerId) {
+    battlerFx.player.instanceId = prevPlayerId;
+  }
+  if (battleView.opponent.active.instanceId !== prevFoeId) {
+    battlerFx.foe.instanceId = prevFoeId;
+  }
 }
 
 function isPlaybackActive(): boolean {
@@ -649,6 +791,7 @@ function eventToPlaybackSteps(event: BattleEvent): PlaybackStep[] {
       kind: "hp",
       tween: {
         targetId: event.targetId,
+        targetSide: event.targetSide,
         from: event.hpBefore,
         to: event.hpAfter,
         elapsed: 0,
@@ -656,8 +799,22 @@ function eventToPlaybackSteps(event: BattleEvent): PlaybackStep[] {
       }
     });
     if (event.fainted) {
+      // The hit has landed and HP has drained; now the downed mon falls away.
+      // The matching switch-in plays later off the engine's promote event.
+      steps.push({ kind: "spriteOut", side: event.targetSide, instanceId: event.targetId, mode: "faintOut", duration: 480, elapsed: 0 });
       steps.push({ kind: "text", text: `${event.targetName} 倒下了。`, duration: 620, elapsed: 0 });
     }
+    return steps;
+  }
+
+  if (event.type === "switch") {
+    const steps: PlaybackStep[] = [{ kind: "text", text: event.text, duration: 380, elapsed: 0 }];
+    // A deliberate recall pulls the old mon back first; a post-faint promote
+    // skips that (the fainted mon already animated out).
+    if (event.reason === "switch" && event.fromId) {
+      steps.push({ kind: "spriteOut", side: event.side, instanceId: event.fromId, mode: "switchOut", duration: 320, elapsed: 0 });
+    }
+    steps.push({ kind: "spriteIn", side: event.side, instanceId: event.toId, duration: 380, elapsed: 0 });
     return steps;
   }
 
@@ -710,6 +867,30 @@ function updateBattlePlayback(deltaMs: number): void {
     return;
   }
 
+  if (currentPlaybackStep.kind === "capture") {
+    updateCaptureStep(currentPlaybackStep, deltaMs);
+    return;
+  }
+
+  if (currentPlaybackStep.kind === "spriteOut" || currentPlaybackStep.kind === "spriteIn") {
+    currentPlaybackStep.elapsed += deltaMs;
+    const fx = battlerFx[currentPlaybackStep.side];
+    if (fx.transition) {
+      fx.transition.elapsed = currentPlaybackStep.elapsed;
+    }
+    if (currentPlaybackStep.elapsed >= currentPlaybackStep.duration) {
+      fx.transition = null;
+      if (currentPlaybackStep.kind === "spriteOut") {
+        fx.hidden = true; // gone — stay off screen until a newcomer enters
+      } else {
+        fx.hidden = false;
+        fx.instanceId = null; // settled in: follow the live active again
+      }
+      currentPlaybackStep = null;
+    }
+    return;
+  }
+
   hpTween = currentPlaybackStep.tween;
   hpTween.elapsed += deltaMs;
   const progress = Math.min(1, hpTween.elapsed / hpTween.duration);
@@ -729,7 +910,23 @@ function startPlaybackStep(step: PlaybackStep): void {
   if (step.kind === "move") {
     spriteAnimation = { event: step.event, elapsed: 0, duration: step.duration };
   }
+  if (step.kind === "spriteOut") {
+    battlerFx[step.side] = { instanceId: step.instanceId, hidden: false, transition: { kind: step.mode, elapsed: 0, duration: step.duration } };
+  }
+  if (step.kind === "spriteIn") {
+    battlerFx[step.side] = { instanceId: step.instanceId, hidden: false, transition: { kind: "in", elapsed: 0, duration: step.duration } };
+  }
+  if (step.kind === "capture") {
+    message = "投出了精灵球！";
+    captureBall.visible = false;
+  }
   if (step.kind === "hp") {
+    // A lethal drain pins the dying mon on screen (sprite + panel) for the whole
+    // bar animation, even though the engine already advanced the active slot —
+    // otherwise the newcomer would flash in before the faint-out plays.
+    if (step.tween.to <= 0) {
+      battlerFx[step.tween.targetSide].instanceId = step.tween.targetId;
+    }
     const lost = step.tween.from - step.tween.to;
     if (lost > 0) {
       const fraction = lost / Math.max(1, step.tween.from);
@@ -790,6 +987,8 @@ function createBattleRenderView(): BattleRenderView {
   const statusPulse = new Graphics();
   const moveLayer = new Container();
   moveLayer.addChild(projectileTrail, projectileOrb, projectileBurst, contactFlash, statusPulse);
+  // Drawn in front of the battlers so the thrown ball reads over the foe sprite.
+  const captureBallGraphic = new Graphics();
 
   const foePanel = createMonsterPanelView();
   const playerPanel = createMonsterPanelView();
@@ -805,6 +1004,7 @@ function createBattleRenderView(): BattleRenderView {
     foeSprite,
     playerSprite,
     moveLayer,
+    captureBallGraphic,
     foePanel.container,
     playerPanel.container,
     dialog.container,
@@ -828,6 +1028,7 @@ function createBattleRenderView(): BattleRenderView {
     projectileBurst,
     contactFlash,
     statusPulse,
+    captureBall: captureBallGraphic,
     playerPanel,
     foePanel,
     dialog,
@@ -937,13 +1138,16 @@ function updateBattleRender(): void {
 
   updateBattleBackgroundView(battleRender.background, elapsed);
 
-  const player = battleView.player.active;
-  const foe = battleView.opponent.active;
+  // Draw the *pinned* battler when a swap is animating (an exiting mon, or a
+  // newcomer mid-entrance), else the live active.
+  const player = shownMonster("player", battleView.player.active);
+  const foe = shownMonster("foe", battleView.opponent.active);
   const playerSprite = getSpriteRenderTuning(player.speciesId, "back", "player");
   const foeSprite = getSpriteRenderTuning(foe.speciesId, "front", "foe");
   updateBattleSprite(battleRender.playerShadow, battleRender.playerBattler, battleRender.playerSprite, player.speciesId, "back", "player", playerSprite.x, playerSprite.y, playerSprite.scale);
   updateBattleSprite(battleRender.foeShadow, battleRender.foeBattler, battleRender.foeSprite, foe.speciesId, "front", "foe", foeSprite.x, foeSprite.y, foeSprite.scale);
   updateMoveAnimation();
+  drawCaptureBall();
 
   updateMonsterPanel(
     battleRender.foePanel,
@@ -1011,16 +1215,181 @@ function updateBattleSprite(
   const layoutSide = side === "player" ? "player" : "foe";
   const groundY = isAnimated ? BATTLE_LAYOUT[layoutSide].platform.y + ANI_FOOT_NUDGE[facing] : y + 6;
 
-  node.scale.set(scale);
-  node.x = x + offset.x + introSlide;
-  node.y = (isAnimated ? groundY : y) + offset.y + bob;
-  node.alpha = intro;
+  // Swap-in/out animation transform (slide, shrink, fade) layered on top of the
+  // resting pose so a retreating or entering battler reads as a transition.
+  const tf = getBattlerTransform(side);
+  node.scale.set(scale * tf.scaleMul);
+  node.x = x + offset.x + introSlide + tf.dx;
+  node.y = (isAnimated ? groundY : y) + offset.y + bob + tf.dy;
+  node.alpha = intro * tf.alpha;
 
   shadow.clear();
-  const shadowRx = battler.naturalSize().width * scale * 0.25;
+  const shadowRx = battler.naturalSize().width * scale * tf.scaleMul * 0.25;
   // Shadow sits at the ground line (platform centre for ani) under the feet; it
   // intentionally ignores `bob` so it stays planted while the sprite bounces.
-  shadow.ellipse(x + offset.x + introSlide, groundY, shadowRx, shadowRx * 0.32).fill({ color: "#243018", alpha: 0.32 * intro });
+  shadow.ellipse(x + offset.x + introSlide + tf.dx, groundY, shadowRx, shadowRx * 0.32).fill({ color: "#243018", alpha: 0.32 * intro * tf.alpha });
+}
+
+/** The battler the renderer should draw for `side`: the pinned swap target, or the live active. */
+function shownMonster(side: BattleSide, live: BattleMonster): BattleMonster {
+  const id = battlerFx[side].instanceId;
+  if (id === null || !battleView) {
+    return live;
+  }
+  const roster = side === "player" ? battleView.player.roster : battleView.opponent.roster;
+  return roster.find((monster) => monster.instanceId === id) ?? live;
+}
+
+/** Position/scale/alpha delta for the active swap transition on `side` (identity when idle). */
+function getBattlerTransform(side: BattleSide): { dx: number; dy: number; scaleMul: number; alpha: number } {
+  const fx = battlerFx[side];
+  const transition = fx.transition;
+  if (!transition) {
+    return { dx: 0, dy: 0, scaleMul: 1, alpha: fx.hidden ? 0 : 1 };
+  }
+
+  const p = clamp01(transition.elapsed / transition.duration);
+  if (transition.kind === "in") {
+    const e = easeOutCubic(p);
+    return { dx: 0, dy: (1 - e) * 46, scaleMul: 0.5 + 0.5 * e, alpha: e };
+  }
+  if (transition.kind === "faintOut") {
+    // Sink straight down while fading — the classic faint slump.
+    return { dx: 0, dy: p * 66, scaleMul: 1, alpha: 1 - p };
+  }
+  if (transition.kind === "captureOut") {
+    // Absorbed into the ball: shrink toward a point and wink out.
+    const e = p * p;
+    return { dx: 0, dy: -p * 6, scaleMul: 1 - 0.92 * e, alpha: 1 - e };
+  }
+  // switchOut: drop and shrink back to the trainer.
+  return { dx: 0, dy: p * 42, scaleMul: 1 - 0.4 * p, alpha: 1 - p };
+}
+
+/**
+ * Drive the Poké Ball capture timeline for one frame: throw arc, absorb the foe,
+ * drop to the platform, wobble once per passed shake check, then click shut
+ * (caught) or burst open (the foe pops back out). Mutates `captureBall` (drawn by
+ * `drawCaptureBall`) and `battlerFx.foe` (the foe sprite's shrink/hide/return).
+ */
+function updateCaptureStep(step: Extract<PlaybackStep, { kind: "capture" }>, deltaMs: number): void {
+  step.elapsed += deltaMs;
+  const t = step.elapsed;
+  const wobbles = step.captured ? 3 : step.shakes;
+
+  const foePos = getBattleSpritePosition("foe");
+  const playerPos = getBattleSpritePosition("player");
+  const origin = { x: playerPos.x, y: playerPos.y - 90 };
+  const ground = { x: foePos.x, y: BATTLE_LAYOUT.foe.platform.y - 12 };
+  // Throw comes to rest above the foe, clearly higher than the first bounce peak.
+  const hover = { x: foePos.x, y: ground.y - (CAPTURE_BOUNCES[0].peak + 56) };
+
+  const tAbsorb = CAPTURE_THROW_MS;
+  const tBounce = tAbsorb + CAPTURE_ABSORB_MS;
+  const tSettle = tBounce + CAPTURE_BOUNCE_MS;
+  const tShake = tSettle + CAPTURE_SETTLE_MS;
+  const tFinish = tShake + CAPTURE_SHAKE_CYCLE_MS * wobbles;
+
+  captureBall.visible = true;
+  captureBall.tilt = 0;
+  captureBall.openness = 0;
+  captureBall.flash = 0;
+  const pinned: BattlerFxState = { instanceId: step.foeId, hidden: true, transition: null };
+
+  if (t < tAbsorb) {
+    // Throw: a tall lobbed arc that comes to rest above the foe.
+    const p = clamp01(t / CAPTURE_THROW_MS);
+    captureBall.x = lerp(origin.x, hover.x, p);
+    captureBall.y = lerp(origin.y, hover.y, p) - Math.sin(p * Math.PI) * 150;
+    captureBall.tilt = p * Math.PI * 3;
+    battlerFx.foe = { instanceId: step.foeId, hidden: false, transition: null };
+  } else if (t < tBounce) {
+    // Absorb (~0.5s): ball opens and the foe is drawn in.
+    const local = t - tAbsorb;
+    const p = clamp01(local / CAPTURE_ABSORB_MS);
+    captureBall.x = hover.x;
+    captureBall.y = hover.y;
+    captureBall.openness = p < 0.6 ? p / 0.6 : 1 - (p - 0.6) / 0.4;
+    captureBall.flash = Math.sin(p * Math.PI) * 0.85;
+    battlerFx.foe = { instanceId: step.foeId, hidden: false, transition: { kind: "captureOut", elapsed: local, duration: CAPTURE_ABSORB_MS } };
+  } else if (t < tSettle) {
+    // Drop and bounce four times, each lower than the last.
+    captureBall.x = ground.x;
+    captureBall.y = captureBounceY(t - tBounce, hover.y, ground.y);
+    battlerFx.foe = pinned;
+  } else if (t < tShake) {
+    // Rest on the ground briefly before the first shake.
+    captureBall.x = ground.x;
+    captureBall.y = ground.y;
+    battlerFx.foe = pinned;
+  } else if (t < tFinish) {
+    // One shake check per second: a short tilt, then a pause to the next check.
+    const local = t - tShake;
+    const index = Math.floor(local / CAPTURE_SHAKE_CYCLE_MS);
+    const inCycle = local - index * CAPTURE_SHAKE_CYCLE_MS;
+    captureBall.x = ground.x;
+    captureBall.y = ground.y;
+    if (inCycle < CAPTURE_SHAKE_ANIM_MS) {
+      const wp = inCycle / CAPTURE_SHAKE_ANIM_MS;
+      const dir = index % 2 === 0 ? 1 : -1;
+      captureBall.tilt = Math.sin(wp * Math.PI) * 0.5 * dir;
+    }
+    battlerFx.foe = pinned;
+  } else if (step.captured) {
+    // Click shut: a quick confirming sparkle, then it rests.
+    const p = clamp01((t - tFinish) / CAPTURE_CLICK_MS);
+    captureBall.x = ground.x;
+    captureBall.y = ground.y;
+    captureBall.flash = p < 0.25 ? p / 0.25 : Math.max(0, 1 - (p - 0.25) / 0.5);
+    battlerFx.foe = pinned;
+  } else {
+    // Burst open: ball flashes wide, vanishes, foe springs back out.
+    const p = clamp01((t - tFinish) / CAPTURE_BURST_MS);
+    captureBall.x = ground.x;
+    captureBall.y = ground.y;
+    captureBall.openness = clamp01(p / 0.3);
+    captureBall.flash = p < 0.3 ? p / 0.3 : 0;
+    captureBall.visible = p < 0.45;
+    battlerFx.foe = { instanceId: step.foeId, hidden: false, transition: { kind: "in", elapsed: t - tFinish, duration: CAPTURE_BURST_MS } };
+  }
+
+  if (step.elapsed >= step.duration) {
+    captureBall.visible = false;
+    battlerFx.foe = step.captured
+      ? { instanceId: step.foeId, hidden: true, transition: null }
+      : { instanceId: null, hidden: false, transition: null };
+    currentPlaybackStep = null;
+  }
+}
+
+const CAPTURE_BALL_RADIUS = 15;
+function drawCaptureBall(): void {
+  const g = battleRender.captureBall;
+  g.clear();
+  if (!captureBall.visible) {
+    return;
+  }
+  g.position.set(captureBall.x, captureBall.y);
+  g.rotation = captureBall.tilt;
+  const r = CAPTURE_BALL_RADIUS;
+
+  // Top dome (red) — semicircle over the top, closed across the diameter.
+  g.arc(0, 0, r, Math.PI, Math.PI * 2).lineTo(-r, 0).fill(0xe6473b);
+  // Bottom dome (off-white).
+  g.arc(0, 0, r, 0, Math.PI).lineTo(r, 0).fill(0xf2f2f4);
+  // Black band + outline.
+  g.rect(-r, -2.6, r * 2, 5.2).fill(0x1e1e26);
+  g.circle(0, 0, r).stroke({ color: 0x1e1e26, width: 2 });
+  // Center button.
+  g.circle(0, 0, 5).fill(0xf2f2f4).stroke({ color: 0x1e1e26, width: 2 });
+  g.circle(0, 0, 2.4).fill(0xb9b9c4);
+  // Energy glow while open, and a click/burst flash ring.
+  if (captureBall.openness > 0) {
+    g.circle(0, 0, r * 0.7).fill({ color: 0xfff2bf, alpha: 0.75 * captureBall.openness });
+  }
+  if (captureBall.flash > 0) {
+    g.circle(0, 0, r + 5 + captureBall.flash * 12).fill({ color: 0xffffff, alpha: 0.5 * captureBall.flash });
+  }
 }
 
 function updateMonsterPanel(view: MonsterPanelView, x: number, y: number, name: string, level: number, hp: number, maxHp: number, mirror: boolean): void {
@@ -1065,7 +1434,7 @@ function updateBattleDialog(): void {
   battleRender.dialog.messageText.visible = showMessage;
   battleRender.controls.container.visible = !showMessage;
   if (!showMessage) {
-    battleRender.controls.update(battleView, getDisplayedHp);
+    battleRender.controls.update(battleView, getDisplayedHp, awaitingReplacement);
   }
 }
 
