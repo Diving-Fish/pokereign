@@ -1,4 +1,4 @@
-import { Container, Graphics, Text, TextStyle } from "pixi.js";
+import { CanvasTextMetrics, Container, Graphics, Text, TextStyle } from "pixi.js";
 import { GAME_HEIGHT, GAME_WIDTH } from "./screen";
 import { adjustColor, PALETTE, pixelText } from "./theme";
 import { ITEMS, type ItemId } from "../../game/data/items";
@@ -16,12 +16,20 @@ const CARD_H = 222;
 const CARD_GAP = 20;
 const GRID_Y = 92;
 const ICON_SIZE = 64;
+const DESC_PAD = 16;
+const DESC_WIDTH = CARD_W - DESC_PAD * 2;
 
 const styles = {
   title: new TextStyle(pixelText({ fill: PALETTE.ink, fontSize: 24, fontWeight: "700", shadow: true })),
   subtitle: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 15, fontWeight: "700" })),
   name: new TextStyle(pixelText({ fill: PALETTE.ink, fontSize: 17, fontWeight: "700", shadow: true })),
-  desc: new TextStyle(pixelText({ fill: PALETTE.inkSoft, fontSize: 12, fontWeight: "700", wordWrapWidth: CARD_W - 28 })),
+  // Centered for ≤2 lines; a left-aligned variant kicks in for longer blurbs.
+  descCenter: new TextStyle(
+    pixelText({ fill: PALETTE.inkSoft, fontSize: 12, fontWeight: "700", wordWrapWidth: DESC_WIDTH, breakWords: true, align: "center" })
+  ),
+  descLeft: new TextStyle(
+    pixelText({ fill: PALETTE.inkSoft, fontSize: 12, fontWeight: "700", wordWrapWidth: DESC_WIDTH, breakWords: true, align: "left" })
+  ),
   pick: new TextStyle(pixelText({ fill: PALETTE.gold, fontSize: 13, fontWeight: "700" }))
 };
 
@@ -148,10 +156,18 @@ function buildItemCard(x: number, y: number, itemId: ItemId, onTap: () => void):
   name.y = ICON_SIZE + 36;
   card.addChild(name);
 
-  const desc = new Text({ text: item.desc, style: styles.desc });
-  desc.anchor.set(0.5, 0);
-  desc.x = CARD_W / 2;
+  // Wrap (breakWords handles CJK); left-align once it spills past two lines so
+  // ragged long blurbs read cleanly, but keep short ones centered.
+  const multiline = CanvasTextMetrics.measureText(item.desc, styles.descLeft).lines.length > 2;
+  const desc = new Text({ text: item.desc, style: multiline ? styles.descLeft : styles.descCenter });
   desc.y = ICON_SIZE + 64;
+  if (multiline) {
+    desc.anchor.set(0, 0);
+    desc.x = DESC_PAD;
+  } else {
+    desc.anchor.set(0.5, 0);
+    desc.x = CARD_W / 2;
+  }
   card.addChild(desc);
 
   const pick = new Text({ text: "▶ 选择", style: styles.pick });

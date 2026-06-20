@@ -159,6 +159,9 @@ type TextStyleInput = {
   fontWeight?: TextStyleFontWeight;
   letterSpacing?: number;
   wordWrapWidth?: number;
+  /** Break inside a "word" — required for CJK wrapping (no spaces to break on). */
+  breakWords?: boolean;
+  align?: "left" | "center" | "right";
   shadow?: boolean;
   shadowColor?: string;
 };
@@ -170,6 +173,8 @@ export function pixelText(input: TextStyleInput) {
     fontWeight = "400",
     letterSpacing = 0,
     wordWrapWidth,
+    breakWords = false,
+    align,
     shadow = false,
     shadowColor = "#00000088"
   } = input;
@@ -180,7 +185,8 @@ export function pixelText(input: TextStyleInput) {
     fontSize,
     fontWeight,
     letterSpacing,
-    ...(wordWrapWidth ? { wordWrap: true as const, wordWrapWidth } : {}),
+    ...(align ? { align } : {}),
+    ...(wordWrapWidth ? { wordWrap: true as const, wordWrapWidth, breakWords } : {}),
     ...(shadow
       ? {
           dropShadow: {
