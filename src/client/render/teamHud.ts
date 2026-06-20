@@ -228,6 +228,8 @@ export type TeamHudView = {
   isDetailOpen(): boolean;
   /** Whether the drag-item action menu is currently open. */
   isItemMenuOpen(): boolean;
+  /** Whether the pickup-decision prompt is showing (freeze the map while it is). */
+  isPickupOpen(): boolean;
 };
 
 /** Hooks the scene supplies so the single backpack item can be dragged onto a monster. */
@@ -242,10 +244,38 @@ export type TeamHudOptions = {
   onApplyBackpackItem?: (monsterIndex: number, action: "use" | "equip") => void;
   /** The player dragged roster member `index` onto the empty backpack slot to unequip its held item. */
   onUnequipHeldItem?: (monsterIndex: number) => void;
+
+  // --- Pickup decision (doc §11.1): a just-picked-up item awaiting one of four
+  // choices. The prompt floats above the bar; 使用/携带 reuse the drag-onto-a-
+  // monster flow (same as the backpack item), 进背包/分解 are buttons. ----------
+  /** The id of the item awaiting a pickup decision (or undefined = no prompt). */
+  getPickupItemId?: () => ItemId | undefined;
+  /** Would 使用 work on roster member `index` right now? Decides 使用/携带 vs auto-携带. */
+  canUsePickupItemOn?: (monsterIndex: number) => boolean;
+  /** Coins the pickup item would yield if disassembled (shown on the 分解 button). */
+  pickupScrapValue?: () => number;
+  /** Player dropped the pickup item on roster member `index` and chose an action. */
+  onApplyPickupItem?: (monsterIndex: number, action: "use" | "equip") => void;
+  /** Player chose 进背包 — stash the pickup item in the single backpack slot. */
+  onStashPickup?: () => void;
+  /** Player chose 分解 — disassemble the pickup item into coins. */
+  onScrapPickup?: () => void;
 };
 
 export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = {}): TeamHudView {
-  const { onReorder, getBackpackItemId, canUseBackpackItemOn, onApplyBackpackItem, onUnequipHeldItem } = options;
+  const {
+    onReorder,
+    getBackpackItemId,
+    canUseBackpackItemOn,
+    onApplyBackpackItem,
+    onUnequipHeldItem,
+    getPickupItemId,
+    canUsePickupItemOn,
+    pickupScrapValue,
+    onApplyPickupItem,
+    onStashPickup,
+    onScrapPickup
+  } = options;
   const bar = new Container();
   bar.x = GAME_WIDTH - MARGIN - BAR_W;
   bar.y = GAME_HEIGHT - MARGIN - BAR_H;
@@ -264,7 +294,7 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     slots.push(slot);
   }
 
-  const itemSlot = createItemSlot((event) => beginItemPress(event));
+  const itemSlot = createItemSlot((event) => beginItemPress(event, "backpack"));
   bar.addChild(itemSlot.container);
 
   // --- Drag-to-reorder the party (decides battle/leadoff order) ---------------
@@ -396,24 +426,31 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
   bar.on("pointerup", onDragEnd);
   bar.on("pointerupoutside", onDragEnd);
 
-  // --- Drag the single backpack item onto a monster ---------------------------
-  // The item slot (right of the party squares) shows the backpack item's icon
-  // when one is stashed. Press-drag it left onto a party square; on drop, if the
-  // item can be 使用 on that monster we pop a 使用 / 携带 menu, otherwise we just
-  // 携带 (equip) it — held-only items (type boosters, etc.) are never "used".
+  // --- Drag an item onto a monster (shared by the backpack slot + pickup) -----
+  // The backpack slot (right of the party squares) and the pickup prompt's icon
+  // are both press-drag sources. Drag onto a party square; on drop, if the item
+  // can be 使用 on that monster we pop a 使用 / 携带 menu, otherwise we just 携带
+  // (equip) it — held-only items (type boosters, etc.) are never "used". The
+  // `source` distinguishes which item id / callbacks the drag resolves through.
+  type ItemDragSource = "backpack" | "pickup";
   let itemDrag: {
+    source: ItemDragSource;
     startX: number;
     startY: number;
     started: boolean;
     ghost: Container | null;
   } | null = null;
 
-  function beginItemPress(event: FederatedPointerEvent): void {
-    if (!getBackpackItemId?.()) {
+  function dragItemId(source: ItemDragSource): ItemId | undefined {
+    return source === "backpack" ? getBackpackItemId?.() : getPickupItemId?.();
+  }
+
+  function beginItemPress(event: FederatedPointerEvent, source: ItemDragSource): void {
+    if (!dragItemId(source)) {
       return;
     }
     const local = bar.toLocal(event.global);
-    itemDrag = { startX: local.x, startY: local.y, started: false, ghost: null };
+    itemDrag = { source, startX: local.x, startY: local.y, started: false, ghost: null };
   }
 
   /** Party-square index under a bar-local point, or -1. */
@@ -437,7 +474,7 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     if (!itemDrag) {
       return;
     }
-    const itemId = getBackpackItemId?.();
+    const itemId = dragItemId(itemDrag.source);
     if (!itemId) {
       cancelItemDrag();
       return;
@@ -449,7 +486,11 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
         return;
       }
       itemDrag.started = true;
-      itemSlot.setDragging(true);
+      if (itemDrag.source === "backpack") {
+        itemSlot.setDragging(true);
+      } else if (pickupIcon) {
+        pickupIcon.alpha = 0.4;
+      }
       const ghost = createItemIcon(itemId, ITEM - 8);
       ghost.alpha = 0.92;
       bar.addChild(ghost);
@@ -471,6 +512,7 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     if (!itemDrag) {
       return;
     }
+    const source = itemDrag.source;
     const started = itemDrag.started;
     const local = bar.toLocal(event.global);
     cancelItemDrag();
@@ -478,13 +520,22 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
       return;
     }
     const target = monsterSlotAt(local.x, local.y);
-    if (target < 0 || !getBackpackItemId?.()) {
+    if (target < 0 || !dragItemId(source)) {
       return;
     }
-    if (canUseBackpackItemOn?.(target)) {
-      openItemActionMenu(target);
+    const canUse = source === "backpack" ? canUseBackpackItemOn?.(target) : canUsePickupItemOn?.(target);
+    if (canUse) {
+      openItemActionMenu(target, source);
     } else {
-      onApplyBackpackItem?.(target, "equip");
+      applyItem(source, target, "equip");
+    }
+  }
+
+  function applyItem(source: ItemDragSource, monsterIndex: number, action: "use" | "equip"): void {
+    if (source === "backpack") {
+      onApplyBackpackItem?.(monsterIndex, action);
+    } else {
+      onApplyPickupItem?.(monsterIndex, action);
     }
   }
 
@@ -494,6 +545,9 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     }
     itemDrag = null;
     itemSlot.setDragging(false);
+    if (pickupIcon) {
+      pickupIcon.alpha = 1;
+    }
     for (let i = 0; i < slots.length; i += 1) {
       slots[i].container.alpha = 1;
     }
@@ -521,7 +575,7 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     actionMenu.visible = false;
   }
 
-  function openItemActionMenu(monsterIndex: number): void {
+  function openItemActionMenu(monsterIndex: number, source: ItemDragSource): void {
     menuPanel.removeChildren().forEach((child) => child.destroy({ children: true }));
 
     const MENU_W = 132;
@@ -540,13 +594,13 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     menuPanel.addChild(
       createMenuButton("使用", PADDING, PADDING, MENU_W - PADDING * 2, BTN_H, () => {
         closeItemMenu();
-        onApplyBackpackItem?.(monsterIndex, "use");
+        applyItem(source, monsterIndex, "use");
       })
     );
     menuPanel.addChild(
       createMenuButton("携带", PADDING, PADDING + BTN_H + 6, MENU_W - PADDING * 2, BTN_H, () => {
         closeItemMenu();
-        onApplyBackpackItem?.(monsterIndex, "equip");
+        applyItem(source, monsterIndex, "equip");
       })
     );
 
@@ -556,6 +610,112 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     menuPanel.x = Math.round(clamp(slotCenterX - MENU_W / 2, 8, GAME_WIDTH - MENU_W - 8));
     menuPanel.y = Math.round(slotTopY - MENU_H - 10);
     actionMenu.visible = true;
+  }
+
+  // --- Pickup decision prompt (doc §11.1) -------------------------------------
+  // Floats just above the bar while an item awaits a decision. 使用/携带 reuse the
+  // drag-onto-a-monster flow (the icon here is a "pickup" drag source); 进背包 and
+  // 分解 are buttons. The whole prompt is a child of `bar`, so it shares the bar's
+  // coordinate space with the drag machinery above.
+  const PROMPT_W = 300;
+  const PROMPT_H = 112;
+  const pickupPrompt = new Container();
+  pickupPrompt.visible = false;
+  pickupPrompt.x = BAR_W - PROMPT_W;
+  pickupPrompt.y = -(PROMPT_H + 12);
+  bar.addChild(pickupPrompt);
+
+  let currentPickupId: ItemId | undefined;
+  let pickupIcon: Container | null = null;
+
+  function rebuildPickupPrompt(itemId: ItemId): void {
+    pickupPrompt.removeChildren().forEach((child) => child.destroy({ children: true }));
+    pickupIcon = null;
+    const item = ITEMS[itemId];
+
+    const frame = new Graphics();
+    frame.roundRect(4, 5, PROMPT_W, PROMPT_H, 10).fill({ color: "#0a0911", alpha: 0.5 });
+    frame.roundRect(0, 0, PROMPT_W, PROMPT_H, 10).fill(PALETTE.panelEdgeDark);
+    frame.roundRect(2, 2, PROMPT_W - 4, PROMPT_H - 4, 9).fill(PALETTE.panelFace);
+    frame.roundRect(2, 2, PROMPT_W - 4, PROMPT_H - 4, 9).stroke({ color: PALETTE.panelEdgeLight, width: 2 });
+    frame.eventMode = "static"; // swallow taps so they don't reach the map behind
+    pickupPrompt.addChild(frame);
+
+    // Draggable item icon (the 使用/携带 source).
+    const ICONSZ = 44;
+    const iconWrap = new Container();
+    iconWrap.x = 12;
+    iconWrap.y = 12;
+    iconWrap.eventMode = "static";
+    iconWrap.cursor = "grab";
+    iconWrap.on("pointerdown", (event) => beginItemPress(event, "pickup"));
+    const iconBg = new Graphics();
+    iconBg.roundRect(0, 0, ICONSZ, ICONSZ, 7).fill(PALETTE.panelEdgeDark);
+    iconBg.roundRect(3, 3, ICONSZ - 6, ICONSZ - 6, 5).fill({ color: PALETTE.panelBack, alpha: 0.8 });
+    iconBg.roundRect(3, 3, ICONSZ - 6, ICONSZ - 6, 5).stroke({ color: PALETTE.gold, width: 1, alpha: 0.6 });
+    iconWrap.addChild(iconBg);
+    const icon = createItemIcon(itemId, ICONSZ - 14);
+    icon.x = 7;
+    icon.y = 7;
+    iconWrap.addChild(icon);
+    pickupPrompt.addChild(iconWrap);
+    pickupIcon = iconWrap;
+
+    const textX = 12 + ICONSZ + 10;
+    const name = new Text({ text: `获得 ${item.name}`, style: styles.value });
+    name.x = textX;
+    name.y = 11;
+    pickupPrompt.addChild(name);
+
+    const desc = new Text({
+      text: item.desc,
+      style: new TextStyle(
+        pixelText({ fill: PALETTE.inkSoft, fontSize: 11, fontWeight: "700", wordWrapWidth: PROMPT_W - textX - 12 })
+      )
+    });
+    desc.x = textX;
+    desc.y = 33;
+    pickupPrompt.addChild(desc);
+
+    const hint = new Text({
+      text: "↓ 拖到队员身上 使用 / 携带",
+      style: new TextStyle(pixelText({ fill: PALETTE.gold, fontSize: 11, fontWeight: "700" }))
+    });
+    hint.x = 12;
+    hint.y = 64;
+    pickupPrompt.addChild(hint);
+
+    // Bottom button row: 收起 (= 进背包, disabled when the slot is taken) + 分解 +N.
+    const BTN_H = 28;
+    const BTN_Y = PROMPT_H - BTN_H - 10;
+    const BTN_W = (PROMPT_W - 24 - 8) / 2;
+    const stashable = getBackpackItemId?.() === undefined;
+    const stashBtn = createMenuButton("收起", 12, BTN_Y, BTN_W, BTN_H, () => {
+      if (stashable) {
+        onStashPickup?.();
+      }
+    });
+    stashBtn.alpha = stashable ? 1 : 0.4;
+    pickupPrompt.addChild(stashBtn);
+
+    const value = pickupScrapValue?.() ?? 0;
+    pickupPrompt.addChild(
+      createMenuButton(`分解 +${value}`, 12 + BTN_W + 8, BTN_Y, BTN_W, BTN_H, () => onScrapPickup?.())
+    );
+  }
+
+  function refreshPickupPrompt(): void {
+    const itemId = getPickupItemId?.();
+    if (itemId !== currentPickupId) {
+      currentPickupId = itemId;
+      if (itemId) {
+        rebuildPickupPrompt(itemId);
+      }
+    } else if (itemId) {
+      // Same item, but the backpack-full state (→ 进背包 enabled) may have changed.
+      rebuildPickupPrompt(itemId);
+    }
+    pickupPrompt.visible = itemId !== undefined;
   }
 
   // Detail modal.
@@ -732,6 +892,7 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
       updateMonsterSlot(slots[i], roster[i]);
     }
     itemSlot.update(getBackpackItemId?.());
+    refreshPickupPrompt();
     if (openIndex !== null) {
       const monster = roster[openIndex];
       if (monster) {
@@ -760,7 +921,8 @@ export function createTeamHud(roster: MonsterState[], options: TeamHudOptions = 
     setVisible,
     closeDetail,
     isDetailOpen: () => openIndex !== null,
-    isItemMenuOpen: () => actionMenu.visible
+    isItemMenuOpen: () => actionMenu.visible,
+    isPickupOpen: () => pickupPrompt.visible
   };
 }
 

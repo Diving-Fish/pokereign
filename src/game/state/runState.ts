@@ -14,6 +14,12 @@ export type PlayerState = {
    * disassembled.
    */
   backpack?: string;
+  /**
+   * Coins earned by disassembling (分解) picked-up items — the payoff for the 4th
+   * pickup choice (doc §11.1). Nothing spends it yet (a shop / crafting sink is a
+   * future system); it is tracked so the decision has a real consequence.
+   */
+  coins?: number;
 };
 
 /**

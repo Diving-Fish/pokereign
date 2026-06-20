@@ -23,6 +23,7 @@ import "pixi.js/gif";
 import { MOVES, type MoveId } from "./game/data/moves";
 import { ITEMS, type ItemId } from "./game/data/items";
 import { canUseItemOnMonster, equipHeldItem, teachTmIntoSlot, unequipHeldItem, useItemOnMonster } from "./game/state/items";
+import { scrapItem, scrapValueOf } from "./game/state/pickup";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
@@ -183,6 +184,10 @@ sceneLayer.addChild(mapRender.container, battleRender.container);
 // monster detail modal are unaffected by battle screen shake and always on top.
 const uiLayer = new Container();
 root.addChild(uiLayer);
+// An item just picked up, awaiting the doc §11.1 decision (使用/携带/进背包/分解).
+// Held "in hand" — not in the backpack — until the player resolves the prompt.
+// Declared before the team HUD because its initial refresh reads it.
+let pendingPickup: ItemId | null = null;
 const teamHud: TeamHudView = createTeamHud(runState.player.team, {
   getBackpackItemId: () => runState.player.backpack as ItemId | undefined,
   canUseBackpackItemOn: (index) => {
@@ -191,7 +196,16 @@ const teamHud: TeamHudView = createTeamHud(runState.player.team, {
     return Boolean(itemId && mon && canUseItemOnMonster(mon, itemId));
   },
   onApplyBackpackItem: (index, action) => applyBackpackItem(index, action),
-  onUnequipHeldItem: (index) => unequipBackpackItem(index)
+  onUnequipHeldItem: (index) => unequipBackpackItem(index),
+  getPickupItemId: () => pendingPickup ?? undefined,
+  canUsePickupItemOn: (index) => {
+    const mon = playerRoster[index];
+    return Boolean(pendingPickup && mon && canUseItemOnMonster(mon, pendingPickup));
+  },
+  pickupScrapValue: () => (pendingPickup ? scrapValueOf(pendingPickup) : 0),
+  onApplyPickupItem: (index, action) => applyPickupItem(index, action),
+  onStashPickup: () => stashPickup(),
+  onScrapPickup: () => scrapPickup()
 });
 uiLayer.addChild(teamHud.bar, teamHud.overlay, teamHud.actionMenu);
 
@@ -218,6 +232,7 @@ if (import.meta.env.DEV) {
     gmEquip?: (slot: number, itemId: ItemId) => void;
     gmUseItem?: (slot: number, itemId: ItemId) => void;
     gmStash?: (itemId: ItemId) => void;
+    gmPickup?: (itemId: ItemId) => void;
   };
   (window as ItemWindow).gmEquip = (slot, itemId) => {
     const mon = playerRoster[slot];
@@ -247,6 +262,15 @@ if (import.meta.env.DEV) {
     runState.player.backpack = itemId;
     teamHud.refresh();
     console.log(`背包放入了 ${ITEMS[itemId].name}（拖到宝可梦身上使用/携带）`);
+  };
+  (window as ItemWindow).gmPickup = (itemId) => {
+    if (!ITEMS[itemId]) {
+      console.warn(`gmPickup: unknown item. Items: ${Object.keys(ITEMS).join(", ")}`);
+      return;
+    }
+    pendingPickup = itemId;
+    teamHud.refresh();
+    console.log(`捡到了 ${ITEMS[itemId].name}（拖到宝可梦使用/携带，或选进背包/分解）`);
   };
 }
 
@@ -292,10 +316,11 @@ let pendingCapturedMonster: MonsterState | null = null;
 // Level-up moves that couldn't auto-fit (4 slots full), awaiting the player's
 // replace/skip decision; drained one at a time after the battle tears down.
 const pendingLearns: PendingLearn[] = [];
-// A TM dragged from the backpack onto a full-moveset monster: the move-learn
-// modal is open for it (on the map, not post-battle). Resolving it teaches the
-// move and consumes the backpack item; skipping leaves the item stashed.
-let bagTmLearn: { instanceId: string; moveId: MoveId } | null = null;
+// A TM dragged onto a full-moveset monster (from the backpack or a fresh pickup):
+// the move-learn modal is open for it (on the map, not post-battle). Resolving it
+// teaches the move and runs `onConsume` (drop the source item); skipping leaves
+// the source item where it was.
+let bagTmLearn: { instanceId: string; moveId: MoveId; onConsume: () => void } | null = null;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -458,7 +483,12 @@ function requestPathTo(tileX: number, tileY: number): void {
 
 function updateMap(deltaMs: number): void {
   // Freeze the overworld while a post-battle decision modal is open.
-  if (captureReplaceView.isOpen() || moveLearnView.isOpen() || teamHud.isItemMenuOpen()) {
+  if (
+    captureReplaceView.isOpen() ||
+    moveLearnView.isOpen() ||
+    teamHud.isItemMenuOpen() ||
+    teamHud.isPickupOpen()
+  ) {
     movePath = [];
     return;
   }
@@ -732,7 +762,7 @@ function resolveMoveLearn(index: number): void {
     if (monster) {
       const forgotten = monster.moves[index];
       if (teachTmIntoSlot(monster, tm.moveId, index)) {
-        takeFromBackpack(runState);
+        tm.onConsume();
         teamHud.refresh();
         showTransientMessage(
           `${SPECIES[monster.speciesId].name} 忘记了 ${MOVES[forgotten].name}，学会了 ${MOVES[tm.moveId].name}！`
@@ -828,7 +858,11 @@ function applyBackpackItem(index: number, action: "use" | "equip"): void {
     case "learnChoice":
       // Four slots full — open the replace modal; the item is consumed only if
       // the player actually learns it (handled in resolveMoveLearn).
-      bagTmLearn = { instanceId: mon.instanceId, moveId: result.moveId };
+      bagTmLearn = {
+        instanceId: mon.instanceId,
+        moveId: result.moveId,
+        onConsume: () => takeFromBackpack(runState)
+      };
       moveLearnView.open(mon, result.moveId);
       break;
     case "healed":
@@ -838,6 +872,107 @@ function applyBackpackItem(index: number, action: "use" | "equip"): void {
       showTransientMessage(`${SPECIES[mon.speciesId].name} 恢复了精神！`);
       break;
   }
+}
+
+/**
+ * Resolve a pickup (doc §11.1) by dropping the in-hand item on roster slot
+ * `index` and choosing 使用 / 携带. Mirrors {@link applyBackpackItem} but the item
+ * lives in `pendingPickup` (not the backpack), so it is cleared — not taken from
+ * the backpack — on success. 携带 onto a monster that already holds something
+ * displaces the old item into the backpack (rejected if the backpack is full).
+ */
+function applyPickupItem(index: number, action: "use" | "equip"): void {
+  const itemId = pendingPickup;
+  const mon = playerRoster[index];
+  if (!itemId || !mon) {
+    return;
+  }
+
+  if (action === "equip") {
+    if (mon.heldItem && isBackpackFull(runState)) {
+      showTransientMessage("背包已满，无法替换它携带的道具。");
+      return;
+    }
+    const prev = equipHeldItem(mon, itemId);
+    pendingPickup = null;
+    if (prev) {
+      stashInBackpack(runState, prev);
+    }
+    teamHud.refresh();
+    showTransientMessage(
+      prev
+        ? `${SPECIES[mon.speciesId].name} 改为携带 ${ITEMS[itemId].name}（原道具进背包）。`
+        : `${SPECIES[mon.speciesId].name} 携带了 ${ITEMS[itemId].name}。`
+    );
+    return;
+  }
+
+  const result = useItemOnMonster(mon, itemId);
+  if (!result.ok) {
+    showTransientMessage(result.reason);
+    return;
+  }
+
+  if (result.consumed) {
+    pendingPickup = null;
+  }
+  teamHud.refresh();
+
+  switch (result.kind) {
+    case "evolved":
+      showTransientMessage(
+        `${SPECIES[result.fromSpeciesId].name} 进化成了 ${SPECIES[result.toSpeciesId].name}！`
+      );
+      break;
+    case "learned":
+      showTransientMessage(`${SPECIES[mon.speciesId].name} 学会了 ${MOVES[result.moveId].name}！`);
+      break;
+    case "learnChoice":
+      // Four slots full — open the replace modal; the pickup is cleared only if
+      // the player actually learns it (handled in resolveMoveLearn).
+      bagTmLearn = {
+        instanceId: mon.instanceId,
+        moveId: result.moveId,
+        onConsume: () => {
+          pendingPickup = null;
+        }
+      };
+      moveLearnView.open(mon, result.moveId);
+      break;
+    case "healed":
+      showTransientMessage(`${SPECIES[mon.speciesId].name} 回复了 ${result.amount} 点体力。`);
+      break;
+    case "revived":
+      showTransientMessage(`${SPECIES[mon.speciesId].name} 恢复了精神！`);
+      break;
+  }
+}
+
+/** Resolve a pickup by stashing the in-hand item in the single backpack slot. */
+function stashPickup(): void {
+  if (!pendingPickup) {
+    return;
+  }
+  if (!stashInBackpack(runState, pendingPickup)) {
+    showTransientMessage("背包已经满了。");
+    return;
+  }
+  const stashed = pendingPickup;
+  pendingPickup = null;
+  teamHud.refresh();
+  showTransientMessage(`${ITEMS[stashed].name} 放入了背包。`);
+}
+
+/** Resolve a pickup by disassembling the in-hand item into coins (doc §11). */
+function scrapPickup(): void {
+  if (!pendingPickup) {
+    return;
+  }
+  const scrapped = pendingPickup;
+  const gain = scrapItem(runState, scrapped);
+  pendingPickup = null;
+  teamHud.refresh();
+  showTransientMessage(`分解了 ${ITEMS[scrapped].name}，获得 ${gain} 金币（共 ${runState.player.coins ?? 0}）。`);
 }
 
 /**

@@ -362,8 +362,38 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
     context (map-side, not the post-battle queue): learning teaches + consumes the
     TM, skipping leaves it stashed. The map freezes while the menu/modal is open.
   - Dev hook `gmStash(itemId)` drops an item into the backpack to test the flow.
-- NOT yet (rest of 2b/2c): the pickup-decision modal (立即用/携带/进背包/分解) + an
-  item reward source, berry held auto-trigger, rare-candy level use, and disassembly.
+
+### Item System — Slice 2c (pickup decision)
+
+- **The doc §11.1 pickup decision** — a just-picked-up item is held "in hand"
+  (`main.ts` `pendingPickup`, NOT the backpack) until the player chooses one of
+  four things: 立即使用 / 携带 / 收起(进背包) / 分解. This is the "no hoarding"
+  pressure the single backpack slot exists for.
+- **Pure logic** `src/game/state/pickup.ts`: `pickupOptions(run, itemId)` returns
+  which of the four are available + the valid use/equip target indices;
+  `canEquipItem` (held + berry only), `scrapValueOf` (coins by kind: stone/tm 3,
+  held 2, medicine/berry 1), `scrapItem(run, itemId)` credits coins.
+  `PlayerState.coins` (`runState.ts`) is the disassembly payoff — nothing spends
+  it yet (a shop/crafting sink is later), tracked so 分解 is a real choice.
+- **UI reuses the Slice 2b-2 drag** (`teamHud.ts`): a prompt floats above the
+  party bar showing the item icon + name + desc. 使用/携带 = drag the prompt icon
+  onto a party square (the icon is a `"pickup"` drag source; the shared item-drag
+  now carries a `source: "backpack" | "pickup"` and routes use/equip + the
+  使用/携带 popup accordingly). 收起/分解 are buttons (收起 disabled + dimmed when
+  the backpack is taken; 分解 shows `+N` coins). The map freezes while the prompt
+  is open (`teamHud.isPickupOpen()`).
+- `main.ts` `applyPickupItem` / `stashPickup` / `scrapPickup` resolve each choice;
+  携带 onto a monster already holding something displaces the old item into the
+  backpack (rejected if the backpack is full). TM full-slot reuses `moveLearnView`
+  via the generalized `bagTmLearn` (now carries an `onConsume` callback, so the
+  same modal serves both backpack TMs and pickup TMs). Dev hook `gmPickup(itemId)`.
+- Verified in-browser (chrome-devtools): the prompt renders for stone/held items,
+  分解 dismisses + credits coins, 收起 moves the item into the 道具 slot (and dims
+  when full), and the prompt-icon drag-to-monster equips.
+- NOT yet: an actual item reward source (drops still only via `gmPickup`/`gmStash`),
+  the pickup decision on real pickups, berry held auto-trigger, rare-candy level
+  use, and a coin sink (shop/crafting). Coins/分解 split into move/element shards
+  (doc §11.4/11.5) is a later refinement of the single `coins` pool.
 
 ### Battle System
 
