@@ -8,6 +8,7 @@ import { fitRendererToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/sc
 import { createTeamHud, type TeamHudView } from "./client/render/teamHud";
 import { createCaptureReplaceView, type CaptureReplaceView } from "./client/render/captureReplaceView";
 import { createMoveLearnView, type MoveLearnView } from "./client/render/moveLearnView";
+import { createRewardChoiceView, type RewardChoiceView } from "./client/render/rewardChoiceView";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
 import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
@@ -24,6 +25,7 @@ import { MOVES, type MoveId } from "./game/data/moves";
 import { ITEMS, type ItemId } from "./game/data/items";
 import { canUseItemOnMonster, equipHeldItem, teachTmIntoSlot, unequipHeldItem, useItemOnMonster } from "./game/state/items";
 import { scrapItem, scrapValueOf } from "./game/state/pickup";
+import { rollBattleRewards } from "./game/state/rewards";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
@@ -224,6 +226,13 @@ const moveLearnView: MoveLearnView = createMoveLearnView({
 });
 uiLayer.addChild(moveLearnView.overlay);
 
+// Post-battle 3-choose-1 reward modal; the picked item drops into the pickup
+// decision flow (`pendingPickup`).
+const rewardChoiceView: RewardChoiceView = createRewardChoiceView({
+  onChoose: (index) => resolveBattleReward(index)
+});
+uiLayer.addChild(rewardChoiceView.overlay);
+
 // Dev-only GM hooks for the item system (no inventory UI yet): equip a held item
 // or use a stone/TM/medicine on a roster slot straight from the console, e.g.
 // `gmEquip(0, "charcoal")`, `gmUseItem(0, "thunderStone")`. Stripped in prod.
@@ -233,6 +242,7 @@ if (import.meta.env.DEV) {
     gmUseItem?: (slot: number, itemId: ItemId) => void;
     gmStash?: (itemId: ItemId) => void;
     gmPickup?: (itemId: ItemId) => void;
+    gmReward?: () => void;
   };
   (window as ItemWindow).gmEquip = (slot, itemId) => {
     const mon = playerRoster[slot];
@@ -270,7 +280,12 @@ if (import.meta.env.DEV) {
     }
     pendingPickup = itemId;
     teamHud.refresh();
-    console.log(`捡到了 ${ITEMS[itemId].name}（拖到宝可梦使用/携带，或选进背包/分解）`);
+    console.log(`捡到了 ${ITEMS[itemId].name}（拖到宝可梦使用/携带，或选收起/分解）`);
+  };
+  (window as ItemWindow).gmReward = () => {
+    pendingReward = rollBattleRewards(rng);
+    rewardChoiceView.open(pendingReward);
+    console.log(`三选一奖励：${pendingReward.map((id) => ITEMS[id].name).join(" / ")}`);
   };
 }
 
@@ -321,6 +336,9 @@ const pendingLearns: PendingLearn[] = [];
 // teaches the move and runs `onConsume` (drop the source item); skipping leaves
 // the source item where it was.
 let bagTmLearn: { instanceId: string; moveId: MoveId; onConsume: () => void } | null = null;
+// The 3-choose-1 item options rolled on a battle win, awaiting the player's pick
+// (drained last in the post-battle queue). The chosen item becomes a pickup.
+let pendingReward: ItemId[] | null = null;
 // Battle- materialized copy of `playerRoster`; index-aligned to it so final HP
 // and status can be written back to the persistent state when the battle ends.
 let battleTeam: BattleMonster[] | null = null;
@@ -486,6 +504,7 @@ function updateMap(deltaMs: number): void {
   if (
     captureReplaceView.isOpen() ||
     moveLearnView.isOpen() ||
+    rewardChoiceView.isOpen() ||
     teamHud.isItemMenuOpen() ||
     teamHud.isPickupOpen()
   ) {
@@ -1299,6 +1318,11 @@ function finishBattlePlaybackIfNeeded(): void {
       markEncounterCleared(runState, activeEncounterId);
       removeEncounterMarker(mapRender, activeEncounterId);
     }
+    // Every won battle offers a 3-choose-1 reward (drained last, after capture /
+    // move-learn decisions). The pick drops into the pickup decision flow.
+    if (pendingOutcome === "player") {
+      pendingReward = rollBattleRewards(rng);
+    }
     activeEncounterId = null;
     mode = "map";
     battle = null;
@@ -1337,7 +1361,31 @@ function openNextPostBattleModal(): void {
       return;
     }
     moveLearnView.open(monster, next.moveId);
+    return;
   }
+  // Last: the battle reward 3-choose-1. The pick becomes a pickup decision, which
+  // is map-driven (the pickup prompt), so nothing else queues after it.
+  if (pendingReward) {
+    rewardChoiceView.open(pendingReward);
+  }
+}
+
+/**
+ * The player picked reward option `index`. The chosen item drops into the pickup
+ * decision flow (`pendingPickup`), so the pickup prompt opens over the map.
+ */
+function resolveBattleReward(index: number): void {
+  const options = pendingReward;
+  rewardChoiceView.close();
+  if (!options || index < 0 || index >= options.length) {
+    pendingReward = null;
+    return;
+  }
+  const chosen = options[index];
+  pendingReward = null;
+  pendingPickup = chosen;
+  teamHud.refresh();
+  showTransientMessage(`选择了 ${ITEMS[chosen].name}。`);
 }
 
 function createBattleRenderView(): BattleRenderView {

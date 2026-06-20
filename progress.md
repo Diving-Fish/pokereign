@@ -390,10 +390,29 @@ The first full overworld → battle → overworld loop is closed (slices B–E a
 - Verified in-browser (chrome-devtools): the prompt renders for stone/held items,
   分解 dismisses + credits coins, 收起 moves the item into the 道具 slot (and dims
   when full), and the prompt-icon drag-to-monster equips.
-- NOT yet: an actual item reward source (drops still only via `gmPickup`/`gmStash`),
-  the pickup decision on real pickups, berry held auto-trigger, rare-candy level
-  use, and a coin sink (shop/crafting). Coins/分解 split into move/element shards
-  (doc §11.4/11.5) is a later refinement of the single `coins` pool.
+- NOT yet: the pickup decision on *real* (non-dev) pickups other than the battle
+  reward below, berry held auto-trigger, rare-candy level use, and a coin sink
+  (shop/crafting). Coins/分解 split into move/element shards (doc §11.4/11.5) is a
+  later refinement of the single `coins` pool.
+
+### Battle Rewards (3-choose-1 → pickup)
+
+- **Every won battle offers a 3-choose-1 item reward**, drained last in the
+  post-battle modal queue (after capture-replace + move-learns). Picking one drops
+  it into the Slice 2c pickup decision (`pendingPickup`), so the pickup prompt then
+  opens over the map — the reward and the "what do I do with it" decision chain.
+- `src/game/state/rewards.ts`: `rollBattleRewards(rng)` returns
+  `BATTLE_REWARD_CHOICES` (=3) **distinct** items using the seeded run `Rng` (so the
+  roll is deterministic / server-reproducible). **TODO(drop-pool):** it currently
+  rolls a flat `PLACEHOLDER_POOL`; the real weighted drop pool keyed by encounter
+  tier / biome / boss (doc §12 奖励分层) is left to do — the roll API (Rng in,
+  `ItemId[]` out) is meant to stay, only the source pool / weighting changes.
+- `src/client/render/rewardChoiceView.ts`: centered, mandatory (no tap-outside
+  dismiss) 3-card board — item icon + name + desc, hover "▶ 选择". Same panel-frame
+  language as `moveLearnView` / `captureReplaceView`.
+- `main.ts`: rolled in `finishBattlePlaybackIfNeeded` on a player win; opened by
+  `openNextPostBattleModal` (last); `resolveBattleReward(index)` sets `pendingPickup`.
+  Freezes the map while open. Dev hook `gmReward()` previews the modal.
 
 ### Battle System
 
