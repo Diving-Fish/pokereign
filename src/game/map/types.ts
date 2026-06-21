@@ -35,5 +35,12 @@ export type TileMapData = {
   layers: {
     ground: TileId[][];
   };
+  /**
+   * Optional explicit walkability grid (`true` = blocked), indexed `[y][x]`. When
+   * present (e.g. the Tiled map derives it from its wall/holes/water layers),
+   * pathfinding uses it directly instead of the `TileId` vocabulary. The
+   * procedural prototype map omits it and falls back to per-tile `blocksMovement`.
+   */
+  collision?: boolean[][];
   objects: MapObject[];
 };

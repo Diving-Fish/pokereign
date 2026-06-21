@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "map:build": "node scripts/build-map-assets.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },

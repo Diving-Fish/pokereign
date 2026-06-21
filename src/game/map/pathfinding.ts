@@ -22,6 +22,10 @@ function isWalkable(map: TileMapData, x: number, y: number): boolean {
   if (x < 0 || y < 0 || x >= map.width || y >= map.height) {
     return false;
   }
+  // An explicit collision grid (Tiled map) wins; otherwise derive from the tile.
+  if (map.collision) {
+    return !map.collision[y]?.[x];
+  }
   const tile = map.layers.ground[y]?.[x] ?? "wall";
   return !TILE_DEFINITIONS[tile].blocksMovement;
 }

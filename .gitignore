@@ -2,5 +2,7 @@ node_modules/
 dist/
 *.log
 
+vendor-assets/
+
 # Cloned for reference only — not part of this repo
 pokemon-showdown-client/

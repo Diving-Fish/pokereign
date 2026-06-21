@@ -3,14 +3,14 @@ import "./styles.css";
 import { createBattleBackgroundView, updateBattleBackgroundView, type BattleBackgroundView } from "./client/render/battleBackground";
 import { createBattleControls, type BattleControlsView } from "./client/render/battleControls";
 import { BATTLE_LAYOUT, getSpriteFootPosition } from "./client/render/battleLayout";
-import { createMapRenderView, removeEncounterMarker, updateMapPathOverlay, updateMapRenderView } from "./client/render/mapView";
+import { removeEncounterMarker, updateMapPathOverlay, updateMapRenderView } from "./client/render/mapView";
+import { createTiledMapRenderView } from "./client/render/tiledMapView";
 import { fitRendererToWindow, GAME_HEIGHT, GAME_WIDTH } from "./client/render/screen";
 import { createTeamHud, type TeamHudView } from "./client/render/teamHud";
 import { createCaptureReplaceView, type CaptureReplaceView } from "./client/render/captureReplaceView";
 import { createMoveLearnView, type MoveLearnView } from "./client/render/moveLearnView";
 import { createRewardChoiceView, type RewardChoiceView } from "./client/render/rewardChoiceView";
 import { hpColors, PALETTE, pixelText } from "./client/render/theme";
-import { createTileTextures, type TileTextureMap } from "./client/render/tileTextures";
 import { BattleEngine } from "./game/battle/BattleEngine";
 import { moveMeta } from "./game/battle/smogonCalc";
 import type { BattleCommand, BattleEvent, BattleMonster, BattleMoveEvent, BattleOutcome, BattleSide, BattleStateView } from "./game/battle/types";
@@ -28,7 +28,7 @@ import { scrapItem, scrapValueOf } from "./game/state/pickup";
 import { rollBattleRewards } from "./game/state/rewards";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
-import { PROTOTYPE_MAP } from "./game/map/prototypeMap";
+import { loadTiledMap } from "./game/map/tiledMap";
 import { findPath, type TileCoord } from "./game/map/pathfinding";
 import { TILE_DEFINITIONS } from "./game/map/tiles";
 import type { MapEncounterObject, TileId } from "./game/map/types";
@@ -91,7 +91,11 @@ type BattleRenderView = {
   controls: BattleControlsView;
 };
 
-const activeMap = PROTOTYPE_MAP;
+// The authored Tiled scene, flattened by `scripts/build-map-assets.mjs` into a
+// self-contained manifest under `public/assets/map/` (served in dev, bundled on
+// build). `mapAssetBase` is where its tileset images live.
+const mapAssetBase = "/assets/map/";
+const { map: activeMap, manifest: mapManifest } = await loadTiledMap(`${mapAssetBase}sample-map.json`);
 
 const app = new Application();
 await app.init({
@@ -137,7 +141,6 @@ if (import.meta.env.DEV) {
 // decode-on-demand pass is planned.)
 void document.fonts?.load('16px "Zpix"').catch(() => undefined);
 
-const tileTextures: TileTextureMap = createTileTextures(app, activeMap.tileSize);
 // Shared TextStyle *instances* (not plain objects): Text keeps the instance it
 // is given, so `setTextStyle`'s reference check actually short-circuits and we
 // avoid re-rasterizing labels every frame when their style is unchanged.
@@ -171,9 +174,10 @@ const sceneLayer = new Container();
 app.stage.addChild(root);
 root.addChild(sceneLayer);
 
-const mapRender = createMapRenderView(
+const mapRender = await createTiledMapRenderView(
   activeMap,
-  tileTextures,
+  mapManifest,
+  mapAssetBase,
   app.renderer.events,
   new Set(runState.clearedEncounterIds),
   (tileX, tileY) => requestPathTo(tileX, tileY)
@@ -458,6 +462,14 @@ function tileAt(x: number, y: number): TileId {
 }
 
 function isBlocked(x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= activeMap.width || y >= activeMap.height) {
+    return true;
+  }
+  // Mirror pathfinding: an explicit collision grid (Tiled map) wins, else fall
+  // back to the procedural map's per-tile `blocksMovement`.
+  if (activeMap.collision) {
+    return !!activeMap.collision[y]?.[x];
+  }
   return TILE_DEFINITIONS[tileAt(x, y)].blocksMovement;
 }
 

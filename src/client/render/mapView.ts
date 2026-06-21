@@ -119,6 +119,9 @@ export function removeEncounterMarker(view: MapRenderView, encounterId: string):
 export function updateMapRenderView(view: MapRenderView, map: TileMapData, pos: { x: number; y: number }): void {
   view.playerMarker.x = pos.x * map.tileSize;
   view.playerMarker.y = pos.y * map.tileSize;
+  // Baseline (feet) depth so the Tiled view can y-sort the player among props it
+  // walks behind/in front of. Harmless for the prototype view (not sortable).
+  view.playerMarker.zIndex = (pos.y + 1) * map.tileSize;
   view.viewport.moveCenter((pos.x + 0.5) * map.tileSize, (pos.y + 0.5) * map.tileSize);
 }
 

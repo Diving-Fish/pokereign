@@ -143,6 +143,43 @@ works on desktop today and a future PC/mobile build with no input rewrite.
   (`createMapRenderView` / `updateMapRenderView`), mirroring the battle render
   module split. Scene visibility toggling moved to the `main.ts` ticker.
 
+### Authored Tiled map (live overworld)
+
+- The live overworld is now an authored **Tiled** scene (`public/assets/Sample
+  map.tmj`, 30×20 @ 32px) instead of the procedural `PROTOTYPE_MAP`.
+  `prototypeMap.ts` + `tileTextures.ts` are kept but no longer on the live path
+  (pathfinding still falls back to them when a map omits `collision`).
+- **Asset pipeline (dev = build, one code path):** `scripts/build-map-assets.mjs`
+  (`npm run map:build`) flattens the `.tmj` + its external `.tsx` tilesets into a
+  self-contained manifest `public/assets/map/sample-map.json` and copies only the
+  *referenced* image subset (~2.4 MB, 89 files of the 49 MB `vendor-assets/` pack)
+  into `public/assets/map/img/`. Because everything lands in `public/`, Vite
+  serves it in dev and copies it into `dist/` on build — no dev/build divergence,
+  no custom plugin. The generated `public/assets/map/` output is committed; the
+  bulky source pack stays gitignored. Re-run the script only when the `.tmj` changes.
+- Two tileset kinds are handled: **spritesheets** (one PNG grid, used by tile
+  layers) and **image collections** (`columns="0"`, one PNG per tile, used by the
+  prop/object layers). The manifest carries both; `resolveGid` (`tiledTypes.ts`)
+  maps a raw gid → tileset + local id, stripping Tiled's top-3-bit flip flags.
+- **Loader** `src/game/map/tiledMap.ts` (pure logic): fetches the manifest and
+  derives a `collision` grid (blocking layers = `wall`, `holes`), a spawn snapped
+  to open **land** (walkable & not water), and a scatter of encounters + one boss.
+  Water (`terrain-river`) stays *walkable* so bridges work; it's only avoided when
+  seating the player/markers. `TileMapData` gained an optional `collision: boolean[][]`;
+  `pathfinding.ts` and `main.ts`'s `isBlocked` use it when present.
+- **Renderer** `src/client/render/tiledMapView.ts` (`createTiledMapRenderView`,
+  async): loads the PNGs via `Assets` (nearest scaling), builds a gid→`Texture`
+  resolver (sheet sub-frames cached; collection tiles map to their image), fills
+  each tile layer into a `CompositeTilemap`, and places object layers as y-sorted
+  (`draworder:"topdown"`) sprites at Tiled's bottom-left anchor with H/V flip. It
+  returns the same `MapRenderView` shape as `mapView.ts`, so the per-frame update/
+  overlay/marker helpers and `main.ts` are reused unchanged.
+- Verified in-browser (chrome-devtools MCP): all layers/props/flips render, player
+  spawns on grass, click-to-walk routes and the camera follows; `npm run build`
+  bundles `dist/assets/map/` (manifest + images).
+- Follow-ups (out of scope for now): y-sort the player into the prop layers so it
+  walks *behind* trees; make water impassable without breaking bridge tiles.
+
 ### Run State (server-sync foundation)
 
 This is being built for a future server-authoritative model: the server will own
