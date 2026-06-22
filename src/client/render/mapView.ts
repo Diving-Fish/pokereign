@@ -34,7 +34,7 @@ export function createMapRenderView(
   tileTextures: TileTextureMap,
   events: EventSystem,
   clearedEncounterIds: ReadonlySet<string> = new Set(),
-  onTileTap?: (tileX: number, tileY: number) => void
+  onWorldTap?: (worldX: number, worldY: number) => void
 ): MapRenderView {
   const worldWidth = map.width * map.tileSize;
   const worldHeight = map.height * map.tileSize;
@@ -53,14 +53,12 @@ export function createMapRenderView(
   // Click/tap-to-walk: the viewport is the hit target for the whole world. A
   // world-sized hit area keeps taps working regardless of the camera transform
   // (`toWorld` undoes it). Pointer events unify mouse + touch for PC/mobile.
-  if (onTileTap) {
+  if (onWorldTap) {
     viewport.eventMode = "static";
     viewport.hitArea = new Rectangle(0, 0, worldWidth, worldHeight);
     viewport.on("pointertap", (event: FederatedPointerEvent) => {
       const world = viewport.toWorld(event.global);
-      const tileX = Math.floor(world.x / map.tileSize);
-      const tileY = Math.floor(world.y / map.tileSize);
-      onTileTap(tileX, tileY);
+      onWorldTap(world.x, world.y);
     });
   }
 
@@ -126,46 +124,54 @@ export function updateMapRenderView(view: MapRenderView, map: TileMapData, pos: 
 }
 
 /**
- * Draw the active click-to-walk path: a dashed-dot trail from the player's
- * current (fractional) position through each queued tile, ending in a pulsing
- * destination ring. Pass an empty path to clear the overlay. `elapsed` (seconds)
- * drives the destination pulse so it gently breathes.
+ * Draw the active movement trail: a line from the player's current position
+ * through any BFS tile-center waypoints, ending at the exact click target.
+ * When both `path` and `directTarget` are absent the overlay is cleared.
+ * `directTarget` is in world pixels; `pos` is corner-based fractional tile
+ * coords (same convention as `renderPos` in main.ts). `elapsed` drives the
+ * pulsing destination ring.
  */
 export function updateMapPathOverlay(
   view: MapRenderView,
   map: TileMapData,
   pos: { x: number; y: number },
   path: ReadonlyArray<{ x: number; y: number }>,
+  directTarget: { x: number; y: number } | null,
   elapsed: number
 ): void {
   const overlay = view.pathOverlay;
   overlay.clear();
-  if (path.length === 0) {
+  if (path.length === 0 && !directTarget) {
     return;
   }
 
   const half = map.tileSize / 2;
-  const center = (tile: { x: number; y: number }) => ({
-    x: tile.x * map.tileSize + half,
-    y: tile.y * map.tileSize + half
-  });
+  // pos uses corner-based fractional tiles; +half gives the player's pixel center.
+  const playerWorld = { x: pos.x * map.tileSize + half, y: pos.y * map.tileSize + half };
+  const tileCenters = path.map((t) => ({ x: t.x * map.tileSize + half, y: t.y * map.tileSize + half }));
+  const goal = directTarget ?? tileCenters[tileCenters.length - 1];
+  if (!goal) {
+    return;
+  }
 
-  // Trail line from the player through every remaining waypoint.
-  const points = [center(pos), ...path.map(center)];
+  // Trail: player → tile-center waypoints → goal.
+  const points: Array<{ x: number; y: number }> = [playerWorld, ...tileCenters];
+  if (directTarget) {
+    points.push(directTarget);
+  }
   overlay.moveTo(points[0].x, points[0].y);
   for (let i = 1; i < points.length; i += 1) {
     overlay.lineTo(points[i].x, points[i].y);
   }
   overlay.stroke({ color: "#f1e0b8", width: 3, alpha: 0.55 });
 
-  // Waypoint dots (skip the final tile; it gets the destination ring instead).
-  for (let i = 0; i < path.length - 1; i += 1) {
-    const p = center(path[i]);
+  // Intermediate dots at BFS tile centers (not the final goal).
+  for (let i = 0; i < tileCenters.length - 1; i += 1) {
+    const p = tileCenters[i];
     overlay.circle(p.x, p.y, 3).fill({ color: "#f4c542", alpha: 0.85 });
   }
 
-  // Destination: a pulsing ring + filled core on the goal tile.
-  const goal = center(path[path.length - 1]);
+  // Destination: pulsing ring + filled core.
   const pulse = 0.5 + 0.5 * Math.sin(elapsed * 5);
   overlay.circle(goal.x, goal.y, 9 + pulse * 4).stroke({ color: "#f4c542", width: 2, alpha: 0.4 + 0.4 * pulse });
   overlay.circle(goal.x, goal.y, 6).fill({ color: "#f4c542", alpha: 0.9 });

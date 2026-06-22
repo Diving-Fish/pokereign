@@ -107,7 +107,7 @@ export async function createTiledMapRenderView(
   assetBase: string,
   events: EventSystem,
   clearedEncounterIds: ReadonlySet<string> = new Set(),
-  onTileTap?: (tileX: number, tileY: number) => void
+  onWorldTap?: (worldX: number, worldY: number) => void
 ): Promise<MapRenderView> {
   const ts = map.tileSize;
   const worldWidth = manifest.width * ts;
@@ -119,12 +119,12 @@ export async function createTiledMapRenderView(
   const viewport = new Viewport({ screenWidth: GAME_WIDTH, screenHeight: GAME_HEIGHT, worldWidth, worldHeight, events });
   viewport.clamp({ direction: "all", underflow: "center" });
 
-  if (onTileTap) {
+  if (onWorldTap) {
     viewport.eventMode = "static";
     viewport.hitArea = new Rectangle(0, 0, worldWidth, worldHeight);
     viewport.on("pointertap", (event: FederatedPointerEvent) => {
       const world = viewport.toWorld(event.global);
-      onTileTap(Math.floor(world.x / ts), Math.floor(world.y / ts));
+      onWorldTap(world.x, world.y);
     });
   }
 

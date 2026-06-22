@@ -100,3 +100,33 @@ function reconstruct(cameFrom: Map<number, number>, width: number, startKey: num
   path.reverse();
   return path;
 }
+
+/**
+ * Check whether the straight line between two world-pixel positions passes
+ * entirely through walkable tiles. Samples at quarter-tile intervals so even
+ * a wall the line merely grazes is reliably detected.
+ */
+export function raycastClear(
+  map: TileMapData,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number
+): boolean {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 1) {
+    return true;
+  }
+  const steps = Math.ceil(dist / (map.tileSize * 0.25));
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps;
+    const tx = Math.floor((x0 + dx * t) / map.tileSize);
+    const ty = Math.floor((y0 + dy * t) / map.tileSize);
+    if (!isWalkable(map, tx, ty)) {
+      return false;
+    }
+  }
+  return true;
+}

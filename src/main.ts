@@ -29,7 +29,7 @@ import { rollBattleRewards } from "./game/state/rewards";
 import type { MonsterSpecies } from "./game/data/types";
 import { SPECIES, type SpeciesId } from "./game/data/species";
 import { loadTiledMap } from "./game/map/tiledMap";
-import { findPath, type TileCoord } from "./game/map/pathfinding";
+import { findPath, raycastClear, type TileCoord } from "./game/map/pathfinding";
 import { TILE_DEFINITIONS } from "./game/map/tiles";
 import type { MapEncounterObject, TileId } from "./game/map/types";
 
@@ -180,7 +180,7 @@ const mapRender = await createTiledMapRenderView(
   mapAssetBase,
   app.renderer.events,
   new Set(runState.clearedEncounterIds),
-  (tileX, tileY) => requestPathTo(tileX, tileY)
+  (worldX, worldY) => requestMoveTo(worldX, worldY)
 );
 const battleRender = createBattleRenderView();
 battleRender.container.visible = false;
@@ -293,10 +293,8 @@ if (import.meta.env.DEV) {
   };
 }
 
-// 4 tiles/sec → 250 ms per tile. Movement is grid-locked: one tile per step,
-// no diagonals, with the on-screen position interpolated across the step so the
-// player and camera glide instead of snapping.
-const STEP_DURATION_MS = 250;
+/** Movement speed: 4 tiles per second, in fractional-tile units per millisecond. */
+const MOVE_SPEED = (4 * activeMap.tileSize) / 1000;
 
 /** Keys that drive manual (keyboard) walking and cancel click-to-walk paths. */
 const MOVEMENT_KEYS = new Set(["arrowleft", "arrowright", "arrowup", "arrowdown", "w", "a", "s", "d"]);
@@ -307,14 +305,25 @@ const SWITCH_HOTKEYS = ["1", "2", "3"];
 
 const keys = new Set<string>();
 let mode: SceneMode = "map";
-let playerTile = { ...runState.player.position };
-let stepFrom = { ...runState.player.position };
+
+// Player position in world pixels (the player's visual center).
+// Initialized to the center of the spawn tile.
+const playerPx = {
+  x: (runState.player.position.x + 0.5) * activeMap.tileSize,
+  y: (runState.player.position.y + 0.5) * activeMap.tileSize
+};
+// Corner-based fractional tile coords consumed by the render layer.
+// renderPos = (playerPx / tileSize) - 0.5, so renderPos.x * ts + ts/2 = playerPx.x.
 const renderPos = { x: runState.player.position.x, y: runState.player.position.y };
-let stepElapsed = 0;
-let stepping = false;
-// Click/tap-to-walk: the queued tiles (each adjacent to the previous) the player
-// is auto-walking toward. A movement keypress clears it for manual override.
+
+// Click-to-walk target in world pixels; null when idle.
+let clickTarget: { x: number; y: number } | null = null;
+// BFS tile path used when the straight line to clickTarget is obstructed.
+// Consumed tile by tile as the player arrives at each center.
 let movePath: TileCoord[] = [];
+// Current tile the player's center is in; used for encounter detection.
+let playerTileX = runState.player.position.x;
+let playerTileY = runState.player.position.y;
 let battle: BattleEngine | null = null;
 let battleView: BattleStateView | null = null;
 // Which map encounter triggered the current battle, so a win can clear it.
@@ -444,8 +453,9 @@ window.addEventListener("keydown", (event) => {
   }
 
   if (mode === "map" && MOVEMENT_KEYS.has(key)) {
-    // Manual walking overrides any active click-to-walk path.
+    // Manual walking overrides any active click-to-walk movement.
     movePath = [];
+    clickTarget = null;
   }
 
   if (mode === "battle") {
@@ -473,11 +483,8 @@ function isBlocked(x: number, y: number): boolean {
   return TILE_DEFINITIONS[tileAt(x, y)].blocksMovement;
 }
 
-/**
- * Desired step direction: keyboard input wins (and cancels any active path);
- * otherwise follow the next tile of the click-to-walk path. One axis at a time.
- */
-function readMoveDir(): { x: number; y: number } | null {
+/** Keyboard-only direction: WASD / arrows → unit vector, or null when no key held. */
+function readKeyboardDir(): { x: number; y: number } | null {
   if (keys.has("arrowleft") || keys.has("a")) {
     return { x: -1, y: 0 };
   }
@@ -490,24 +497,37 @@ function readMoveDir(): { x: number; y: number } | null {
   if (keys.has("arrowdown") || keys.has("s")) {
     return { x: 0, y: 1 };
   }
-  if (movePath.length > 0) {
-    const target = movePath[0];
-    return { x: Math.sign(target.x - playerTile.x), y: Math.sign(target.y - playerTile.y) };
-  }
   return null;
 }
 
 /**
- * Click/tap-to-walk: pathfind to the tapped tile and queue the walk. Bounded by
- * the search-node cap, so far/unreachable targets are simply ignored.
+ * Click/tap-to-walk: try a straight-line path first (raycast). If any tile
+ * along that line is blocked, fall back to BFS. Unreachable or out-of-bounds
+ * clicks are silently ignored.
  */
-function requestPathTo(tileX: number, tileY: number): void {
+function requestMoveTo(worldX: number, worldY: number): void {
   if (mode !== "map") {
     return;
   }
-  const path = findPath(activeMap, playerTile, { x: tileX, y: tileY });
+  const ts = activeMap.tileSize;
+  const goalTileX = Math.floor(worldX / ts);
+  const goalTileY = Math.floor(worldY / ts);
+  if (isBlocked(goalTileX, goalTileY)) {
+    return;
+  }
+  if (raycastClear(activeMap, playerPx.x, playerPx.y, worldX, worldY)) {
+    // Straight line is clear — walk directly to the clicked pixel.
+    movePath = [];
+    clickTarget = { x: worldX, y: worldY };
+    return;
+  }
+  // Straight line obstructed — use BFS through tile centers, then finish at
+  // the exact click pixel once the path is exhausted.
+  const startTile = { x: Math.floor(playerPx.x / ts), y: Math.floor(playerPx.y / ts) };
+  const path = findPath(activeMap, startTile, { x: goalTileX, y: goalTileY });
   if (path && path.length > 0) {
     movePath = path;
+    clickTarget = { x: worldX, y: worldY };
   }
 }
 
@@ -521,63 +541,88 @@ function updateMap(deltaMs: number): void {
     teamHud.isPickupOpen()
   ) {
     movePath = [];
+    clickTarget = null;
     return;
   }
 
-  // Consume the frame's time across one or more tile steps so holding a key
-  // walks at a steady 2.5 tiles/sec with no per-tile micro-pause.
-  let remaining = deltaMs;
+  const ts = activeMap.tileSize;
+  const speed = MOVE_SPEED * deltaMs; // max pixels to travel this frame
 
-  while (remaining > 0) {
-    if (!stepping) {
-      const dir = readMoveDir();
-      if (!dir) {
-        return;
-      }
-      const next = { x: playerTile.x + dir.x, y: playerTile.y + dir.y };
-      if (isBlocked(next.x, next.y)) {
-        movePath = [];
-        return;
-      }
-      stepFrom = { ...playerTile };
-      playerTile = next;
-      stepElapsed = 0;
-      stepping = true;
+  const keyDir = readKeyboardDir();
+  if (keyDir) {
+    // Keyboard overrides click movement; advance in the chosen direction.
+    const newX = playerPx.x + keyDir.x * speed;
+    const newY = playerPx.y + keyDir.y * speed;
+    const tx = Math.floor(newX / ts);
+    const ty = Math.floor(newY / ts);
+    if (!isBlocked(tx, ty)) {
+      playerPx.x = newX;
+      playerPx.y = newY;
     }
-
-    const consumed = Math.min(remaining, STEP_DURATION_MS - stepElapsed);
-    stepElapsed += consumed;
-    remaining -= consumed;
-
-    const t = stepElapsed / STEP_DURATION_MS;
-    renderPos.x = lerp(stepFrom.x, playerTile.x, t);
-    renderPos.y = lerp(stepFrom.y, playerTile.y, t);
-
-    if (stepElapsed >= STEP_DURATION_MS) {
-      stepping = false;
-      renderPos.x = playerTile.x;
-      renderPos.y = playerTile.y;
-      // Commit the arrived tile to the authoritative run snapshot.
-      runState.player.position.x = playerTile.x;
-      runState.player.position.y = playerTile.y;
-
-      // Consume the path node we just reached.
-      if (movePath.length > 0 && movePath[0].x === playerTile.x && movePath[0].y === playerTile.y) {
-        movePath.shift();
+  } else if (movePath.length > 0) {
+    // Following the BFS path: advance toward the center of the next waypoint.
+    const wp = movePath[0];
+    const wpX = (wp.x + 0.5) * ts;
+    const wpY = (wp.y + 0.5) * ts;
+    const dx = wpX - playerPx.x;
+    const dy = wpY - playerPx.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= speed) {
+      playerPx.x = wpX;
+      playerPx.y = wpY;
+      movePath.shift();
+      // When the BFS leg ends, clickTarget carries the final sub-tile position
+      // and is handled next frame via the direct movement branch below.
+    } else {
+      playerPx.x += (dx / dist) * speed;
+      playerPx.y += (dy / dist) * speed;
+    }
+  } else if (clickTarget) {
+    // Straight-line (or last sub-tile) leg: advance directly toward the target.
+    const dx = clickTarget.x - playerPx.x;
+    const dy = clickTarget.y - playerPx.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= speed) {
+      playerPx.x = clickTarget.x;
+      playerPx.y = clickTarget.y;
+      clickTarget = null;
+    } else {
+      const nx = playerPx.x + (dx / dist) * speed;
+      const ny = playerPx.y + (dy / dist) * speed;
+      // Safety collision check (shouldn't trigger for a valid raycast path,
+      // but guards against edge-case drift into a wall).
+      if (!isBlocked(Math.floor(nx / ts), Math.floor(ny / ts))) {
+        playerPx.x = nx;
+        playerPx.y = ny;
+      } else {
+        clickTarget = null;
       }
+    }
+  }
 
-      const encounter = activeMap.objects.find(
-        (item) =>
-          item.kind === "encounter" &&
-          item.x === playerTile.x &&
-          item.y === playerTile.y &&
-          !isEncounterCleared(runState, item.id)
-      );
-      if (encounter) {
-        movePath = [];
-        startBattle(encounter);
-        return;
-      }
+  // Update render position (corner-based fractional tile: playerPx / ts - 0.5).
+  renderPos.x = playerPx.x / ts - 0.5;
+  renderPos.y = playerPx.y / ts - 0.5;
+
+  // Detect tile crossings for encounter triggers and run-state persistence.
+  const newTileX = Math.floor(playerPx.x / ts);
+  const newTileY = Math.floor(playerPx.y / ts);
+  if (newTileX !== playerTileX || newTileY !== playerTileY) {
+    playerTileX = newTileX;
+    playerTileY = newTileY;
+    runState.player.position.x = newTileX;
+    runState.player.position.y = newTileY;
+    const encounter = activeMap.objects.find(
+      (item) =>
+        item.kind === "encounter" &&
+        item.x === newTileX &&
+        item.y === newTileY &&
+        !isEncounterCleared(runState, item.id)
+    );
+    if (encounter) {
+      movePath = [];
+      clickTarget = null;
+      startBattle(encounter);
     }
   }
 }
@@ -1955,7 +2000,7 @@ app.ticker.add((ticker) => {
     sceneLayer.position.set(0, 0);
     updateMap(ticker.deltaMS);
     updateMapRenderView(mapRender, activeMap, renderPos);
-    updateMapPathOverlay(mapRender, activeMap, renderPos, movePath, elapsed);
+    updateMapPathOverlay(mapRender, activeMap, renderPos, movePath, clickTarget, elapsed);
   } else {
     mapRender.container.visible = false;
     battleRender.container.visible = true;
